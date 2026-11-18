@@ -278,6 +278,34 @@ def test_non_integer_season_rejected(tmp_path):
         load_matches(discover_csv_files(tmp_path), ["2024-ish"])
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [2026.5, 2026.0, float("inf"), float("-inf"), float("nan"), True, False],
+    ids=["fractional", "integral-float", "inf", "-inf", "nan", "true", "false"],
+)
+def test_strict_season_values_rejected_with_value_in_message(tmp_path, bad):
+    path = write_season_csv(tmp_path / "2024-atp-season.csv", [make_row()])
+    with pytest.raises(ValueError) as excinfo:
+        load_matches([path], [bad])
+    message = str(excinfo.value)
+    assert "season" in message
+    assert repr(bad) in message
+
+
+def test_strict_season_rejects_mixed_valid_and_invalid(tmp_path):
+    path = write_season_csv(tmp_path / "2024-atp-season.csv", [make_row()])
+    with pytest.raises(ValueError) as excinfo:
+        load_matches([path], [2024, 2026.0])
+    assert "2026.0" in str(excinfo.value)
+
+
+def test_valid_integer_seasons_accepted(tmp_path):
+    write_season_csv(tmp_path / "2024-atp-season.csv", [make_row(match_id="a", season_year="2024")])
+    write_season_csv(tmp_path / "2025-atp-season.csv", [make_row(match_id="b", season_year="2025")])
+    paths = discover_csv_files(tmp_path)
+    assert [match.match_id for match in load_matches(paths, [2024, 2025]).matches] == ["a", "b"]
+
+
 def test_unavailable_season_rejected(tmp_path):
     write_season_csv(tmp_path / "2024-atp-season.csv", [make_row(season_year="2024")])
     with pytest.raises(ValueError) as excinfo:
@@ -593,6 +621,40 @@ def test_malformed_eligible_row_rejected_with_context(tmp_path, overrides):
     message = str(excinfo.value)
     assert "malformed-atp-season.csv" in message
     assert ":2:" in message
+
+
+@pytest.mark.parametrize(
+    "bad_timestamp",
+    ["1767320100000", str(10**20), str(-(10**20))],
+    ids=["milliseconds", "huge-positive", "huge-negative"],
+)
+def test_unrepresentable_timestamp_rejected_with_context(tmp_path, bad_timestamp):
+    path = write_season_csv(
+        tmp_path / "timestamp-atp-season.csv",
+        [make_row(date_timestamp=bad_timestamp)],
+    )
+    with pytest.raises(ValueError) as excinfo:
+        load_matches([path], [2024])
+    message = str(excinfo.value)
+    assert "timestamp-atp-season.csv" in message
+    assert ":2:" in message
+    assert "date_timestamp" in message
+
+
+def test_representable_timestamps_accepted(tmp_path):
+    path = write_season_csv(
+        tmp_path / "epoch-atp-season.csv",
+        [
+            make_row(match_id="epoch", date_timestamp="0"),
+            make_row(match_id="negative", date_timestamp="-1"),
+            make_row(match_id="december-season", date_timestamp=DEC_2023, season_year="2024"),
+        ],
+    )
+    result = load_matches([path], [2024])
+    assert {match.match_id for match in result.matches} == {"epoch", "negative", "december-season"}
+    # No calendar or current-date constraint: a negative representable epoch is kept as-is.
+    assert {match.timestamp for match in result.matches} == {0, -1, int(DEC_2023)}
+    assert_accounting(result)
 
 
 def test_malformed_excluded_row_is_not_rejected(tmp_path):

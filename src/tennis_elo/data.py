@@ -11,6 +11,7 @@ import csv
 import itertools
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -250,10 +251,11 @@ def _normalize_seasons(seasons: Iterable[int]) -> frozenset[int]:
 
     parsed: list[int] = []
     for value in raw:
-        try:
-            parsed.append(int(value))
-        except (TypeError, ValueError):
-            raise ValueError(f"season must be an integer, got {value!r}") from None
+        # ValueError (not TypeError) is the contracted season error: callers normalize
+        # selections through this path and must see one exception type for bad values.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"season must be an integer, got {value!r}")  # noqa: TRY004
+        parsed.append(value)
 
     if len(set(parsed)) != len(parsed):
         raise ValueError("selected seasons must be distinct")
@@ -265,6 +267,21 @@ def _normalize_seasons(seasons: Iterable[int]) -> frozenset[int]:
         if later != earlier + 1:
             raise ValueError(f"selected seasons must be consecutive, got {ordered}")
     return frozenset(ordered)
+
+
+def _check_timestamp_representable(timestamp: int, raw: str, context: str) -> None:
+    """Reject timestamps that cannot be shown as a UTC datetime.
+
+    The season is authoritative and no calendar or current-date constraint is
+    applied here; representable negative epochs are valid.
+    """
+    try:
+        datetime.fromtimestamp(timestamp, tz=UTC)
+    except (ValueError, OverflowError, OSError) as exc:
+        raise ValueError(
+            f"{context}: malformed eligible row: date_timestamp {raw!r} "
+            f"is not a representable UTC datetime ({exc})"
+        ) from exc
 
 
 def _field(row: dict[str, str], key: str) -> str:
@@ -322,6 +339,7 @@ def _build_match(row: dict[str, str], season: int, path: Path, line: int) -> Mat
         raise ValueError(
             f"{context}: malformed eligible row: invalid date_timestamp {timestamp_raw!r}"
         ) from None
+    _check_timestamp_representable(timestamp, timestamp_raw, context)
 
     home_id = _field(row, "home_id")
     away_id = _field(row, "away_id")
