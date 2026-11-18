@@ -1,9 +1,10 @@
 """Local Streamlit dashboard for the Tennis Elo package.
 
 Start it with ``uv run --extra dashboard tennis-elo-dashboard`` (or
-``streamlit run src/tennis_elo/dashboard.py``). The app binds loopback only, has
-no authentication and hosts nothing remotely: it is a local presentation layer
-over the P0 API.
+``streamlit run src/tennis_elo/dashboard.py``). The launcher binds localhost by
+default and the app has no authentication: it is a local presentation layer over
+the P0 API. ``--address`` and forwarded Streamlit flags can change the bind, so
+only expose it on trusted networks.
 
 Data loading, rating and export logic stay in the P0 modules
 (:mod:`tennis_elo.api` and :mod:`tennis_elo.export`). They are imported inside
@@ -28,6 +29,7 @@ from tennis_elo.dashboard_views import (
     FRESH_START_NOTICE,
     HISTORY_COLUMNS,
     LEADERBOARD_COLUMNS,
+    PLAYER_COMPARISON_COLUMNS,
     build_player_options,
     build_rating_config,
     comparison_entry,
@@ -40,12 +42,15 @@ from tennis_elo.dashboard_views import (
     exclusion_rows,
     filter_player_options,
     filter_ranking_rows,
+    merge_player_rows,
     plain_text,
+    player_comparison_rows,
     player_history_rows,
+    player_option_label,
     player_stat_rows,
+    raw_player_id,
     run_metadata_rows,
     safe_download_filename,
-    safe_label,
     season_selection_problem,
     season_window_plan,
     sort_ranking_rows,
@@ -159,6 +164,10 @@ def _sidebar() -> dict[str, Any]:
     reload_clicked = st.sidebar.button("Reload seasons", key="reload_seasons")
     if reload_clicked or discovery.get("path") != canonical:
         st.session_state["discovery"] = _discover_seasons(canonical)
+        # A different directory invalidates season-derived widget state, so the
+        # preset is reapplied below instead of leaving a stale subset selected.
+        st.session_state.pop("seasons", None)
+        st.session_state.pop("end_season", None)
     discovery = st.session_state["discovery"]
     if discovery["error"]:
         st.sidebar.error(discovery["error"])
@@ -211,7 +220,8 @@ def _sidebar() -> dict[str, Any]:
         value=DEFAULT_INITIAL_RATING,
         step=10.0,
         key="initial_rating",
-        help="Every selected season starts every player from this rating.",
+        help="Each calculation starts every player from this rating. Within a run ratings "
+        "carry from the first selected season to the next.",
     )
     k_factor = st.sidebar.number_input(
         "K-factor",
@@ -393,6 +403,21 @@ def _render_leaderboard(run: Mapping[str, Any], state: Mapping[str, Any]) -> Non
         )
 
 
+def _label_formatter(labels: Mapping[str, str]) -> Callable[[str], str]:
+    """Build a selectbox label formatter for the current run's player labels.
+
+    The widget state stays the raw player ID; only the display label changes when
+    a player's latest name changes. The map is captured per run so the formatter
+    also works when Streamlit re-serializes widget state outside the script run
+    (for example in AppTest).
+    """
+
+    def format_player_id(player_id: str) -> str:
+        return labels.get(player_id, player_id)
+
+    return format_player_id
+
+
 def _render_player(run: Mapping[str, Any]) -> None:
     rows = run["ranking_rows"]
     history = run["history_rows"]
@@ -401,6 +426,9 @@ def _render_player(run: Mapping[str, Any]) -> None:
     if not options:
         st.info("No players were rated for this selection.")
         return
+    # The widget state is the raw player ID; labels are display-only, so a player
+    # whose latest name changes between windows keeps its selection.
+    st.session_state["_player_labels"] = {option.player_id: option.label for option in options}
 
     query = st.text_input(
         "Search players",
@@ -412,15 +440,20 @@ def _render_player(run: Mapping[str, Any]) -> None:
         st.info("No player matches that search.")
         return
 
-    labels = [option.label for option in matching]
-    if st.session_state.get("player_label") not in labels:
-        st.session_state["player_label"] = labels[0]
-    picked_label = st.selectbox("Player", options=labels, key="player_label")
-    option = next(option for option in matching if option.label == picked_label)
+    player_ids = [option.player_id for option in matching]
+    if st.session_state.get("player_id") not in player_ids:
+        st.session_state["player_id"] = player_ids[0]
+    picked_id = st.selectbox(
+        "Player",
+        options=player_ids,
+        format_func=_label_formatter({option.player_id: option.label for option in matching}),
+        key="player_id",
+    )
+    option = next(option for option in matching if option.player_id == picked_id)
 
     st.subheader(escape_markdown(option.label))
     ranking_row = next(
-        (row for row in rows if safe_label(row.get("player_id")) == option.player_id), None
+        (row for row in rows if raw_player_id(row.get("player_id")) == option.player_id), None
     )
     if ranking_row is not None:
         stats = pd.DataFrame(list(player_stat_rows(ranking_row)), columns=["stat", "value"])
@@ -429,9 +462,13 @@ def _render_player(run: Mapping[str, Any]) -> None:
     chart_rows = elo_chart_rows(history, option.player_id)
     if chart_rows:
         st.markdown("**Elo rating after every match**")
+        chart_frame = pd.DataFrame(list(chart_rows))
+        # Timezone-aware UTC timestamps: one temporal point per match, so several
+        # matches on the same date stay distinct and correctly ordered.
+        chart_frame["match_date"] = pd.to_datetime(chart_frame["match_date"], utc=True)
         st.line_chart(
-            pd.DataFrame(list(chart_rows)),
-            x="date",
+            chart_frame,
+            x="match_date",
             y="rating",
             x_label="Match date",
             y_label="Elo rating",
@@ -473,7 +510,14 @@ def _render_run(state: Mapping[str, Any]) -> None:
 def _compute_comparison(
     state: Mapping[str, Any], plans: Sequence[Any], end_year: int
 ) -> dict[str, Any]:
+    """Recompute every available window independently and cache per-window players.
+
+    The per-window ranking rows are stored so that changing the selected player
+    re-renders the comparison without recomputing any window.
+    """
     entries: dict[int, Any] = {}
+    players: dict[int, dict[str, dict[str, Any]]] = {}
+    errors: dict[int, str] = {}
     for plan in plans:
         if not plan.available:
             continue
@@ -485,11 +529,24 @@ def _compute_comparison(
                     config=state["config"],
                     include_history=False,
                 )
+                rows = _ranking_rows(result)
         except RUNTIME_ERRORS as exc:  # user-facing message instead of a traceback
-            entries[plan.size] = error_message(exc)
+            message = error_message(exc)
+            errors[plan.size] = message
+            entries[plan.size] = message
             continue
         entries[plan.size] = comparison_entry(result)
-    return {"signature": (state["input_dir"], state["config"], end_year), "entries": entries}
+        players[plan.size] = {
+            player_id: dict(row)
+            for row in rows
+            if (player_id := raw_player_id(row.get("player_id")))
+        }
+    return {
+        "signature": (state["input_dir"], state["config"], end_year),
+        "entries": entries,
+        "players": players,
+        "errors": errors,
+    }
 
 
 def _render_comparison(state: Mapping[str, Any]) -> None:
@@ -516,10 +573,54 @@ def _render_comparison(state: Mapping[str, Any]) -> None:
         )
         return
 
-    table = pd.DataFrame(
+    players_by_window: Mapping[int, Mapping[str, Mapping[str, Any]]] = stored.get("players") or {}
+    label_map: Mapping[str, str] = st.session_state.get("_player_labels") or {}
+    selected_id = st.session_state.get("player_id")
+    if not selected_id:
+        # No main-run selection yet: offer the union of players seen in any window.
+        union_rows = merge_player_rows(
+            [list((players_by_window.get(size) or {}).values()) for size in (1, 2, 3)]
+        )
+        if not union_rows:
+            st.info("No players were rated in the compared windows.")
+            return
+        union_labels = {
+            row["player_id"]: player_option_label(row.get("name"), row["player_id"])
+            for row in union_rows
+        }
+        union_ids = [row["player_id"] for row in union_rows]
+        if st.session_state.get("comparison_player") not in union_ids:
+            st.session_state["comparison_player"] = union_ids[0]
+        st.caption("No player is selected in Player detail yet, so this picker drives the table.")
+        selected_id = st.selectbox(
+            "Comparison player",
+            options=union_ids,
+            format_func=_label_formatter(union_labels),
+            key="comparison_player",
+        )
+        label_map = union_labels
+
+    player_label = label_map.get(selected_id) or player_option_label(selected_id, selected_id)
+    st.markdown(f"**Per-player comparison for {escape_markdown(player_label)}**")
+    per_player = player_comparison_rows(
+        plans,
+        players_by_window,
+        player_id=selected_id,
+        player_label=player_label,
+        errors=stored.get("errors") or {},
+    )
+    st.dataframe(
+        pd.DataFrame(list(per_player), columns=list(PLAYER_COMPARISON_COLUMNS)).astype(str),
+        key="player_comparison",
+        hide_index=True,
+        width=DATAFRAME_WIDTH,
+    )
+
+    st.markdown("**Dataset summary per window**")
+    dataset = pd.DataFrame(
         list(comparison_rows(plans, stored["entries"])), columns=list(COMPARISON_COLUMNS)
     )
-    st.dataframe(table.astype(str), key="comparison", hide_index=True, width=DATAFRAME_WIDTH)
+    st.dataframe(dataset.astype(str), key="comparison", hide_index=True, width=DATAFRAME_WIDTH)
 
 
 def _initialise_state() -> None:
@@ -537,8 +638,8 @@ def main() -> None:
 
     st.title("Tennis Elo")
     st.caption(
-        "Local, reproducible Elo over the supplied ATP season CSVs. Nothing is uploaded "
-        "and the server binds loopback only."
+        "Local, reproducible Elo over the supplied ATP season CSVs. Nothing is uploaded, "
+        "and the launcher binds localhost by default."
     )
     st.info(FRESH_START_NOTICE)
 

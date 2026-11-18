@@ -1,10 +1,11 @@
 """Console launcher for the optional local Tennis Elo Streamlit dashboard.
 
 ``tennis-elo-dashboard`` starts the installed Streamlit CLI against
-:mod:`tennis_elo.dashboard` and binds the loopback interface by default, so the
-dashboard is only reachable from the local machine. Streamlit is an optional
-extra: importing this module never imports Streamlit, and a missing extra
-produces an actionable installation message instead of a traceback.
+:mod:`tennis_elo.dashboard` and binds localhost by default. ``--address`` and
+forwarded Streamlit arguments can change the bind, so only expose the dashboard
+on trusted networks; there is no authentication. Streamlit is an optional extra:
+importing this module never imports Streamlit, and a missing extra produces an
+actionable installation message instead of a traceback.
 
 The launcher blocks for as long as the web server runs (that is what ``streamlit
 run`` does); stop it with Ctrl-C.
@@ -58,12 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the launcher argument parser."""
     parser = argparse.ArgumentParser(
         prog="tennis-elo-dashboard",
-        description="Serve the local Tennis Elo Streamlit dashboard (localhost only).",
+        description="Serve the local Tennis Elo Streamlit dashboard (localhost by default).",
     )
     parser.add_argument(
         "--address",
         default=DEFAULT_ADDRESS,
-        help=f"interface to bind (default: {DEFAULT_ADDRESS}, loopback only)",
+        help=f"interface to bind (default: {DEFAULT_ADDRESS}; 0.0.0.0 exposes it to the network)",
     )
     parser.add_argument(
         "--port",

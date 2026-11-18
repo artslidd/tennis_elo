@@ -14,6 +14,7 @@ import dataclasses
 import subprocess
 import sys
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from tennis_elo.dashboard_views import (
     HISTORY_COLUMNS,
     LEADERBOARD_COLUMNS,
     MISSING_DASHBOARD_DEPENDENCIES,
+    PLAYER_COMPARISON_COLUMNS,
     build_player_options,
     build_rating_config,
     comparison_entry,
@@ -38,7 +40,9 @@ from tennis_elo.dashboard_views import (
     filter_player_options,
     filter_ranking_rows,
     load_accounting,
+    merge_player_rows,
     plain_text,
+    player_comparison_rows,
     player_history_rows,
     player_option_label,
     player_stat_rows,
@@ -48,6 +52,7 @@ from tennis_elo.dashboard_views import (
     season_selection_problem,
     season_window_plan,
     sort_ranking_rows,
+    timestamp_to_datetime_utc,
     timestamp_to_iso_date,
     window_label,
     window_plans,
@@ -278,6 +283,27 @@ def make_history_rows() -> list[dict]:
     return rows
 
 
+def same_day_history_rows() -> list[dict]:
+    """Two matches for p1 on the same UTC date, one morning and one midday."""
+    base = {
+        "season_year": 2026,
+        "player_id": "p1",
+        "player_name": "Alpha A.",
+        "opponent_id": "p2",
+        "opponent_name": "Beta B.",
+        "won": True,
+        "rating_before": 1500.0,
+        "opponent_rating_before": 1500.0,
+        "expected_score": 0.5,
+        "tournament": "Test Open",
+        "surface": "hard",
+    }
+    return [
+        {**base, "match_id": "m-late", "timestamp": TS_1 + 43200, "rating_after": 1516.0},
+        {**base, "match_id": "m-early", "timestamp": TS_1, "rating_after": 1508.0},
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Pure presentation helpers
 # --------------------------------------------------------------------------- #
@@ -342,7 +368,22 @@ def test_player_options_skip_duplicates_and_blank_ids():
     ]
     options = build_player_options(rows)
     assert [option.player_id for option in options] == ["p1", "p2", "p3"]
-    assert all(option.label == f"{option.name} ({option.player_id})" for option in options)
+    assert all(
+        option.label == player_option_label(option.name, option.player_id) for option in options
+    )
+
+
+def test_player_options_preserve_raw_ids_while_labels_stay_display_safe():
+    rows = [
+        {"player_id": " 12345 ", "name": HOSTILE_NAME},
+        {"player_id": "[evil](x)", "name": "Normal N."},
+        {"player_id": "", "name": "ghost"},
+    ]
+    options = build_player_options(rows)
+    # Selection state must keep the raw identity the API uses, not a display label.
+    assert [option.player_id for option in options] == ["12345", "[evil](x)"]
+    assert options[0].label == "img src=x onerror=alert(1) (12345)"
+    assert "<" not in options[0].label and ">" not in options[0].label
 
 
 def test_filter_player_options_matches_name_and_id():
@@ -489,6 +530,15 @@ def test_timestamp_to_iso_date_handles_invalid_values():
     assert timestamp_to_iso_date("not-a-timestamp") == ""
 
 
+def test_timestamp_to_datetime_utc_handles_invalid_values():
+    moment = timestamp_to_datetime_utc(TS_1)
+    assert moment == datetime(2026, 1, 1, tzinfo=UTC)
+    assert moment.tzinfo is UTC
+    assert timestamp_to_datetime_utc("not-a-timestamp") is None
+    assert timestamp_to_datetime_utc(None) is None
+    assert timestamp_to_datetime_utc(True) is None
+
+
 def test_player_history_rows_filters_sorts_and_labels_opponent():
     rows = player_history_rows(make_history_rows(), "p1")
     assert [row["match_id"] for row in rows] == ["m1", "m2", "m3"]
@@ -499,8 +549,24 @@ def test_player_history_rows_filters_sorts_and_labels_opponent():
 
 def test_elo_chart_rows_expose_dates_and_rounded_ratings():
     rows = elo_chart_rows(make_history_rows(), "p1")
-    assert [row["date"] for row in rows] == ["2026-01-01", "2026-01-02", "2026-07-01"]
+    assert [row["match_date"] for row in rows] == [
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 2, tzinfo=UTC),
+        datetime(2026, 7, 1, tzinfo=UTC),
+    ]
     assert [row["rating"] for row in rows] == [1516.0, 1498.6, 1532.5]
+    assert all(isinstance(row["match_date"], datetime) for row in rows)
+
+
+def test_elo_chart_rows_keep_same_day_matches_distinct_and_ordered():
+    points = elo_chart_rows(same_day_history_rows(), "p1")
+    assert [point["match_id"] for point in points] == ["m-early", "m-late"]
+    assert [point["match_date"] for point in points] == [
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 1, 12, tzinfo=UTC),
+    ]
+    assert points[0]["match_date"] != points[1]["match_date"]  # one point per match
+    assert [point["rating"] for point in points] == [1508.0, 1516.0]
 
 
 def test_player_stat_rows_include_win_rate_and_ids():
@@ -546,6 +612,53 @@ def test_comparison_entry_reads_models_and_disambiguates_top_player():
     assert entry["seasons"] == "2025\u20132026"
     assert entry["excluded_matches"] == 2
     assert entry["duplicate_rows"] == 1
+
+
+def test_fresh_start_notice_states_carry_within_run_and_independent_resets():
+    notice = FRESH_START_NOTICE.lower()
+    assert "initial rating" in notice
+    assert "carry" in notice and "within" in notice
+    assert "independent" in notice or "separately" in notice
+    assert "not continuous annual" in notice
+
+
+def test_merge_player_rows_prefers_the_nearest_window():
+    newest = [{"player_id": "p1", "name": "Alice New"}]
+    older = [
+        {"player_id": "p1", "name": "Alice Old"},
+        {"player_id": "p4", "name": "Veteran V."},
+    ]
+    merged = merge_player_rows([newest, older])
+    assert [row["player_id"] for row in merged] == ["p1", "p4"]
+    assert merged[0]["name"] == "Alice New"
+    assert merge_player_rows([]) == ()
+    assert merge_player_rows([[], []]) == ()
+
+
+def test_player_comparison_rows_statuses_never_fake_ratings():
+    plans = window_plans((2024, 2025, 2026), end_year=2026)
+    top = make_ranking_rows()[0]
+    players = {1: {"p1": top}, 3: {"p1": top}}
+    rows = player_comparison_rows(plans, players, player_id="p1", player_label="Alice New (p1)")
+    assert [row["status"] for row in rows] == ["rated", "not rated", "rated"]
+    assert rows[0]["rating"] == 1532.5 and rows[0]["rank"] == 1 and rows[0]["matches"] == 3
+    assert rows[0]["player"] == "Alice New (p1)"
+    assert rows[1]["rating"] == "" and rows[1]["rank"] == "" and rows[1]["matches"] == ""
+    assert "1500" not in str(rows[1])
+    assert "no eligible match" in rows[1]["note"]
+
+    with_errors = player_comparison_rows(
+        plans, players, player_id="p1", player_label="Alice New (p1)", errors={3: "boom"}
+    )
+    assert with_errors[2]["status"] == "error" and with_errors[2]["note"] == "boom"
+
+    short = window_plans((2026,), end_year=2026)
+    unavailable = player_comparison_rows(short, {}, player_id="p1", player_label="Alice New (p1)")
+    assert [row["status"] for row in unavailable] == ["not rated", "unavailable", "unavailable"]
+    assert "2025" in unavailable[1]["note"]
+
+    no_player = player_comparison_rows(plans, players, player_id=None)
+    assert {row["status"] for row in no_player} == {"no player selected"}
 
 
 def test_comparison_rows_mark_unavailable_and_error_windows():
@@ -628,6 +741,15 @@ def test_launcher_help_returns_zero(capsys):
     assert "tennis-elo-dashboard" in capsys.readouterr().out
 
 
+def test_no_loopback_only_claims_in_user_facing_text():
+    paths = (APP_PATH, Path(dashboard_launcher.__file__), REPO_ROOT / "docs" / "dashboard.md")
+    for path in paths:
+        text = " ".join(path.read_text(encoding="utf-8").lower().split())
+        assert "loopback only" not in text, path
+        assert "hosts nothing remotely" not in text, path
+        assert "localhost by default" in text, path
+
+
 def test_launcher_import_does_not_import_streamlit_or_pandas():
     script = (
         "import sys; import tennis_elo.dashboard_launcher as launcher;"
@@ -649,12 +771,38 @@ st = pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest
 
 
+def _window_ranking_rows(calculated, min_matches=0):
+    """Stub export rows that vary per window: alias name and a 2024-only player."""
+    seasons = tuple(getattr(calculated, "seasons", ()))
+    rows = make_ranking_rows()
+    for row in rows:
+        if row["player_id"] == "p1":
+            row["name"] = "Alice A." if seasons == (2025,) else "Alice New"
+    if 2024 in seasons:
+        rows.append(
+            {
+                "rank": 4,
+                "player_id": "p4",
+                "name": "Veteran V.",
+                "rating": 1440.0,
+                "matches": 4,
+                "wins": 1,
+                "losses": 3,
+                "first_match_date": "2024-01-08",
+                "last_match_date": "2024-11-10",
+            }
+        )
+    return [row for row in rows if int(row["matches"]) >= min_matches]
+
+
 def _install_stub_modules(
     monkeypatch,
     *,
     seasons=(2024, 2025, 2026),
+    seasons_by_name=None,
     result=None,
     calculate_error=None,
+    ranking_rows_hook=None,
     calls=None,
 ):
     """Inject stub P0 modules; the app imports them lazily at runtime only."""
@@ -667,6 +815,10 @@ def _install_stub_modules(
 
     def fake_available_seasons(input_dir):
         note("available_seasons", str(input_dir))
+        if seasons_by_name:
+            named = seasons_by_name.get(Path(input_dir).name)
+            if named is not None:
+                return tuple(named)
         return tuple(seasons)
 
     def fake_calculate(input_dir, seasons_, *, config=None, include_history=False):
@@ -676,7 +828,9 @@ def _install_stub_modules(
         return result if result is not None else make_calculation_result(tuple(seasons_))
 
     def fake_ranking_rows(calculated, min_matches=0):
-        note("ranking_rows", min_matches)
+        note("ranking_rows", tuple(getattr(calculated, "seasons", ())), min_matches)
+        if ranking_rows_hook is not None:
+            return ranking_rows_hook(calculated, min_matches)
         return make_ranking_rows()
 
     def fake_history_rows(calculated):
@@ -790,7 +944,7 @@ def test_app_calculates_and_renders_leaderboard_player_detail_and_downloads(monk
     assert not any(call[0] == "history_csv" for call in calls)
 
     assert "Player ID" in set(_frame(app, ("stat", "value"))["stat"])
-    assert "(p1)" in app.selectbox(key="player_label").value
+    assert "(p1)" in app.selectbox(key="player_id").format_func("p1")
     assert _frame(app, HISTORY_COLUMNS) is not None
     assert len(app.get("vega_lite_chart")) >= 1
 
@@ -840,22 +994,24 @@ def test_app_player_selector_disambiguates_ids_and_search_resets_selection(monke
     app = _run_app(monkeypatch)
     app.button(key="calculate").click().run()
 
-    labels = app.selectbox(key="player_label").options
-    assert labels == [
+    selector = app.selectbox(key="player_id")
+    assert selector.options == [
         "Alpha A. (p1)",
         "Alpha A. (p2)",
         "img src=x onerror=alert(1) (p3)",
     ]
-    assert len(set(labels)) == 3  # duplicate player names stay distinguishable by ID
+    assert len(set(selector.options)) == 3  # duplicate names stay distinguishable by ID
+    assert selector.value == "p1"  # the widget state is the raw stable ID
+    assert selector.format_func("p3") == "img src=x onerror=alert(1) (p3)"
 
-    app.selectbox(key="player_label").select(labels[2]).run()
-    assert "p3" in app.selectbox(key="player_label").value
+    selector.select("p3").run()
+    assert app.selectbox(key="player_id").value == "p3"
     rendered = _texts(app.subheader) + _texts(app.markdown) + _texts(app.caption)
     assert "alert" in rendered
     assert "<img" not in rendered
 
     app.text_input(key="player_search").set_value("p2").run()
-    assert app.selectbox(key="player_label").value == "Alpha A. (p2)"
+    assert app.selectbox(key="player_id").value == "p2"
 
     app.text_input(key="player_search").set_value("no-such-player").run()
     assert not app.exception
@@ -867,7 +1023,7 @@ def test_app_player_history_and_chart_follow_selected_player(monkeypatch):
     app.button(key="calculate").click().run()
     assert list(_frame(app, HISTORY_COLUMNS)["match_id"]) == ["m1", "m2", "m3"]
 
-    app.selectbox(key="player_label").select("Alpha A. (p2)").run()
+    app.selectbox(key="player_id").select("p2").run()
     assert list(_frame(app, HISTORY_COLUMNS)["match_id"]) == ["m1"]
 
 
@@ -912,16 +1068,148 @@ def test_app_comparison_labels_unavailable_windows(monkeypatch):
 
     app.button(key="compare_windows").click().run()
     assert not app.exception
-    comparison = _frame(app, COMPARISON_COLUMNS)
+    comparison = _frame(app, COMPARISON_COLUMNS)  # secondary dataset summary
     statuses = list(comparison["status"])
     assert statuses == ["available", "available", "unavailable"]
     assert "2024" in comparison["note"].iloc[2]
     assert list(comparison["seasons"])[:2] == ["2026", "2025\u20132026"]
 
+    per_player = _frame(app, PLAYER_COMPARISON_COLUMNS)  # primary player table
+    assert list(per_player["status"]) == ["rated", "rated", "unavailable"]
+    assert list(per_player["rating"])[:2] == ["1532.5", "1532.5"]
+    assert list(per_player["rank"])[:2] == ["1", "1"]
+
     computed_windows = [call[1] for call in calls if call[0] == "calculate"]
     assert computed_windows == [(2026,), (2025, 2026)]
     assert all(call[3] is False for call in calls if call[0] == "calculate")
     assert "initial rating" in _texts(app.info).lower()
+
+
+def test_app_player_selector_keeps_raw_id_when_latest_name_changes(monkeypatch):
+    app = _run_app(monkeypatch, ranking_rows_hook=_window_ranking_rows)
+    app.button(key="calculate").click().run()
+    assert app.selectbox(key="player_id").value == "p1"
+    assert app.selectbox(key="player_id").format_func("p1") == "Alice New (p1)"
+
+    # Same player ID, newer/older latest name depending on the window.
+    app.selectbox(key="end_season").select(2025).run()
+    app.button(key="calculate").click().run()
+    assert not app.exception
+    assert app.session_state["player_id"] == "p1"  # raw stable ID, never a label
+    assert app.selectbox(key="player_id").value == "p1"
+    assert app.selectbox(key="player_id").format_func("p1") == "Alice A. (p1)"
+    assert "Alice A" in _texts(app.subheader)
+
+
+def test_app_comparison_uses_selected_player_without_recomputing(monkeypatch):
+    calls = []
+    app = _run_app(monkeypatch, calls=calls, ranking_rows_hook=_window_ranking_rows)
+    app.button(key="calculate").click().run()
+    assert app.selectbox(key="player_id").value == "p1"
+
+    app.button(key="compare_windows").click().run()
+    assert not app.exception
+    after_compare = len([call for call in calls if call[0] == "calculate"])
+    assert after_compare == 4  # the main run plus three independent windows
+    ranking_calls = len([call for call in calls if call[0] == "ranking_rows"])
+
+    primary = _frame(app, PLAYER_COMPARISON_COLUMNS)
+    assert list(primary["status"]) == ["rated", "rated", "rated"]
+    assert list(primary["player"]) == ["Alice New (p1)"] * 3
+    assert list(primary["rating"]) == ["1532.5"] * 3
+    assert list(primary["rank"]) == ["1"] * 3
+    assert list(primary["matches"]) == ["3"] * 3
+    assert list(primary["seasons"]) == ["2026", "2025\u20132026", "2024\u20132026"]
+
+    # Changing the selected player re-renders from the cached per-window results.
+    app.selectbox(key="player_id").select("p3").run()
+    assert not app.exception
+    # Cached per-window player rows: no window and no ranking table is recomputed.
+    assert len([call for call in calls if call[0] == "calculate"]) == after_compare
+    assert len([call for call in calls if call[0] == "ranking_rows"]) == ranking_calls
+    primary = _frame(app, PLAYER_COMPARISON_COLUMNS)
+    assert all("(p3)" in label for label in primary["player"])
+    assert list(primary["rating"]) == ["1466.0"] * 3
+    assert list(primary["rank"]) == ["3"] * 3
+
+
+def test_app_comparison_before_main_run_uses_union_picker_and_marks_not_rated(monkeypatch):
+    calls = []
+    app = _run_app(monkeypatch, calls=calls, ranking_rows_hook=_window_ranking_rows)
+    assert "player_id" not in app.session_state
+
+    app.button(key="compare_windows").click().run()
+    assert not app.exception
+    after_compare = len([call for call in calls if call[0] == "calculate"])
+
+    picker = app.selectbox(key="comparison_player")
+    assert picker.options == [  # union of the compared windows, disambiguated by ID
+        "Alice New (p1)",
+        "Alpha A. (p2)",
+        "img src=x onerror=alert(1) (p3)",
+        "Veteran V. (p4)",
+    ]
+    assert picker.value == "p1"  # raw stable ID
+    assert picker.format_func("p4") == "Veteran V. (p4)"
+
+    primary = _frame(app, PLAYER_COMPARISON_COLUMNS)
+    assert list(primary["status"]) == ["rated", "rated", "rated"]
+
+    picker.select("p4").run()
+    assert not app.exception
+    assert len([call for call in calls if call[0] == "calculate"]) == after_compare
+    primary = _frame(app, PLAYER_COMPARISON_COLUMNS)
+    assert list(primary["status"]) == ["not rated", "not rated", "rated"]
+    assert list(primary["player"]) == ["Veteran V. (p4)"] * 3
+    assert list(primary["rating"]) == ["", "", "1440.0"]  # never a fabricated 1500
+    assert "1500" not in str(primary["rating"].tolist())
+    assert "no eligible match" in primary["note"].iloc[0]
+
+
+def test_app_chart_uses_temporal_match_timestamps(monkeypatch):
+    app = _run_app(monkeypatch)
+    app.button(key="calculate").click().run()
+    charts = app.get("vega_lite_chart")
+    assert len(charts) == 1
+    spec = charts[0].proto.spec
+    assert '"field": "match_date"' in spec
+    assert '"type": "temporal"' in spec
+    assert '"type": "nominal"' not in spec
+
+
+def test_app_data_directory_change_reapplies_preset(monkeypatch, tmp_path):
+    season_dirs = {
+        "A": (2024, 2025, 2026),
+        "D": (2025, 2026),
+        "B": (2020, 2021),
+    }
+    for name in season_dirs:
+        (tmp_path / name).mkdir()
+    app = _run_app(monkeypatch, seasons_by_name=season_dirs)
+
+    app.text_input(key="input_dir").set_value(str(tmp_path / "A")).run()
+    app.radio(key="preset_size").set_value("3 seasons").run()
+    assert list(app.multiselect(key="seasons").value) == [2024, 2025, 2026]
+    assert app.button(key="calculate").disabled is False
+
+    # A directory with only two seasons must not keep a two-season subset enabled.
+    app.text_input(key="input_dir").set_value(str(tmp_path / "D")).run()
+    assert list(app.multiselect(key="seasons").value) == []
+    assert app.button(key="calculate").disabled is True
+    assert "unavailable" in (_texts(app.info) + _texts(app.warning)).lower()
+
+    app.radio(key="preset_size").set_value("2 seasons").run()
+    assert list(app.multiselect(key="seasons").value) == [2025, 2026]
+    assert app.button(key="calculate").disabled is False
+
+    # A directory whose seasons do not overlap the previous preset at all.
+    app.radio(key="preset_size").set_value("3 seasons").run()
+    app.text_input(key="input_dir").set_value(str(tmp_path / "B")).run()
+    assert list(app.multiselect(key="seasons").value) == []
+    assert int(app.selectbox(key="end_season").value) == 2021
+    app.radio(key="preset_size").set_value("2 seasons").run()
+    assert list(app.multiselect(key="seasons").value) == [2020, 2021]
+    assert app.button(key="calculate").disabled is False
 
 
 @pytest.mark.skipif(not REAL_CSV.exists(), reason="real season CSV not available")

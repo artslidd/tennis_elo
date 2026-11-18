@@ -2,8 +2,9 @@
 
 The optional local Streamlit dashboard presents the P0 ratings. It reads the
 season CSVs, calls the public API, and shows the leaderboard, exclusions and
-player detail. It hosts nothing remotely: the launcher binds loopback only and
-there is no authentication.
+player detail. There is no authentication and the launcher binds localhost by
+default; `--address` or forwarded Streamlit flags can change the bind, so only
+expose it on trusted networks.
 
 ## Install and launch
 
@@ -21,7 +22,9 @@ uv run --extra dashboard tennis-elo-dashboard -- --theme.base=dark
 ```
 
 `--address` defaults to `localhost`; pass `--address 127.0.0.1` for the explicit
-loopback form. Everything after `--` is forwarded to `streamlit run`. The
+loopback form, or `0.0.0.0` to expose the dashboard to your network (no
+authentication is provided). Everything after `--` is forwarded to `streamlit
+run`. The
 launcher blocks while the server runs - stop it with Ctrl-C. Without the extra it
 exits with code 1 and prints the `uv sync --extra dashboard` instruction instead
 of a traceback.
@@ -46,9 +49,12 @@ of a traceback.
   duplicates, excluded rows and the load accounting identity.
 - **Leaderboard**: searchable by name or player ID, sortable by any column, Elo
   rounded to one decimal for display only.
-- **Player detail**: a selector labelled `Name (player ID)` so equal names stay
-  distinguishable, key statistics, an Elo chart with one point per match date and
-  the match history (newest last).
+- **Player detail**: a selector whose state is the raw player ID and whose label
+  is `Name (player ID)`, so equal names stay distinguishable and a player keeps
+  its selection when the latest name changes between windows. It shows key
+  statistics, an Elo chart with one temporal point per match (UTC timestamps, so
+  several matches on one date stay distinct and ordered) and the match history
+  (newest last).
 - **Downloads**: rankings and match-history CSV come from `tennis_elo.export`
   (`rankings_csv` / `history_csv`). The full match-history export is behind an
   opt-in toggle and is built once per run.
@@ -67,6 +73,15 @@ If a window needs a season that is not in the data directory, the row is marked
 `unavailable`, lists the missing seasons, and is never replaced by a shorter
 calculation.
 
+The primary comparison table is per player: for the selected player ID it shows
+the rating, global rank, matches, wins and losses in each window; a window where
+the player has no eligible match is marked `not rated` with empty numbers and no
+invented (initial) rating. The per-window player tables are cached with the
+comparison, so changing the selected player re-renders without recomputing any
+window. Before any main calculation there is no selected player, so a picker over
+the union of the compared windows' players drives the table. The dataset summary
+per window remains available as a secondary table.
+
 ## Text safety
 
 Player names, tournaments and surfaces come from CSV files, so every value that
@@ -79,10 +94,14 @@ Streamlit's default HTML escaping is kept on; the app uses no custom CSS,
 ## Tests
 
 ```bash
-uv run --locked pytest tests/test_models.py tests/test_dashboard.py -q
-uv run ruff check src/tennis_elo/dashboard.py src/tennis_elo/dashboard_launcher.py \
-    src/tennis_elo/dashboard_views.py tests/test_dashboard.py
+uv run --locked --extra dashboard pytest tests/test_models.py tests/test_dashboard.py -q
+uv run --locked --extra dashboard ruff check src/tennis_elo/dashboard.py \
+    src/tennis_elo/dashboard_launcher.py src/tennis_elo/dashboard_views.py \
+    tests/test_dashboard.py
 ```
+
+`--extra dashboard` matters: a plain `uv run` removes the optional Streamlit and
+pandas dependencies from the environment, which makes the `AppTest` cases skip.
 
 `tests/test_dashboard.py` covers the pure helpers (search, sorting, player-ID
 disambiguation, window availability, text safety, errors), the launcher

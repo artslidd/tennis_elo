@@ -29,6 +29,7 @@ __all__ = [
     "HISTORY_COLUMNS",
     "LEADERBOARD_COLUMNS",
     "MISSING_DASHBOARD_DEPENDENCIES",
+    "PLAYER_COMPARISON_COLUMNS",
     "WINDOW_SIZES",
     "LoadAccounting",
     "PlayerOption",
@@ -46,10 +47,13 @@ __all__ = [
     "filter_player_options",
     "filter_ranking_rows",
     "load_accounting",
+    "merge_player_rows",
     "plain_text",
+    "player_comparison_rows",
     "player_history_rows",
     "player_option_label",
     "player_stat_rows",
+    "raw_player_id",
     "run_metadata_rows",
     "safe_download_filename",
     "safe_label",
@@ -57,6 +61,7 @@ __all__ = [
     "season_window",
     "season_window_plan",
     "sort_ranking_rows",
+    "timestamp_to_datetime_utc",
     "timestamp_to_iso_date",
     "window_label",
     "window_plans",
@@ -90,6 +95,18 @@ HISTORY_COLUMNS: tuple[str, ...] = (
     "expected_score",
     "rating_after",
 )
+PLAYER_COMPARISON_COLUMNS: tuple[str, ...] = (
+    "window",
+    "seasons",
+    "status",
+    "player",
+    "rating",
+    "rank",
+    "matches",
+    "wins",
+    "losses",
+    "note",
+)
 COMPARISON_COLUMNS: tuple[str, ...] = (
     "window",
     "seasons",
@@ -102,9 +119,11 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
 )
 
 FRESH_START_NOTICE = (
-    "Fresh start: every calculation starts every player at the configured initial rating "
-    "(1500 by default) and replays only the selected seasons. These are not continuous "
-    "annual Elo changes - ratings never carry over from seasons outside the selection."
+    "Fresh start: each calculation starts every player at the configured initial rating "
+    "(1500 by default) and replays only its selected seasons. Within one calculation, "
+    "ratings carry from season to season in chronological order; between separate "
+    "calculations nothing carries over, so independent window comparisons each start over "
+    "from the initial rating. These are not continuous annual Elo changes."
 )
 
 MISSING_DASHBOARD_DEPENDENCIES = (
@@ -257,11 +276,22 @@ def display_ranking_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, A
 
 @dataclass(frozen=True, slots=True)
 class PlayerOption:
-    """One selectable player, always disambiguated by its stable ID."""
+    """One selectable player.
+
+    ``player_id`` is the raw, stable identity the API uses (never a display label);
+    ``name`` and ``label`` are display-safe copies.
+    """
 
     player_id: str
     name: str
     label: str
+
+
+def raw_player_id(value: Any) -> str:
+    """Return the raw player identity used for selection and lookups."""
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def player_option_label(name: Any, player_id: Any) -> str:
@@ -276,7 +306,7 @@ def build_player_options(rows: Iterable[Mapping[str, Any]]) -> tuple[PlayerOptio
     options: list[PlayerOption] = []
     seen: set[str] = set()
     for row in rows:
-        player_id = safe_label(row.get("player_id"))
+        player_id = raw_player_id(row.get("player_id"))
         if not player_id or player_id in seen:
             continue
         seen.add(player_id)
@@ -285,6 +315,22 @@ def build_player_options(rows: Iterable[Mapping[str, Any]]) -> tuple[PlayerOptio
             PlayerOption(player_id=player_id, name=name, label=player_option_label(name, player_id))
         )
     return tuple(options)
+
+
+def merge_player_rows(
+    row_groups: Sequence[Iterable[Mapping[str, Any]]],
+) -> tuple[dict[str, Any], ...]:
+    """Union ranking rows across windows, in priority order (nearest window first)."""
+    merged: dict[str, dict[str, Any]] = {}
+    for rows in row_groups:
+        for row in rows:
+            player_id = raw_player_id(row.get("player_id"))
+            if not player_id or player_id in merged:
+                continue
+            copy = dict(row)
+            copy["player_id"] = player_id
+            merged[player_id] = copy
+    return tuple(merged.values())
 
 
 def filter_player_options(
@@ -507,7 +553,7 @@ def comparison_rows(
     plans: Iterable[SeasonWindow],
     entries: Mapping[int, Mapping[str, Any] | str | None],
 ) -> tuple[dict[str, Any], ...]:
-    """Merge window plans with per-size results (a ``str`` entry means an error)."""
+    """Merge window plans with per-size dataset summaries (a ``str`` entry means an error)."""
     rows: list[dict[str, Any]] = []
     for plan in plans:
         row: dict[str, Any] = {
@@ -533,6 +579,65 @@ def comparison_rows(
             row["duplicate_rows"] = entry.get("duplicate_rows", "")
             if entry.get("seasons"):
                 row["seasons"] = safe_label(entry["seasons"])
+        rows.append(row)
+    return tuple(rows)
+
+
+def player_comparison_rows(
+    plans: Iterable[SeasonWindow],
+    players_by_window: Mapping[int, Mapping[str, Mapping[str, Any]]],
+    *,
+    player_id: str | None,
+    player_label: str = "",
+    errors: Mapping[int, str] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Per-player comparison of the same selected player across windows.
+
+    A window whose seasons are missing is ``unavailable``; a window where the
+    selected player has no eligible match is ``not rated`` with empty numbers.
+    No rating is ever invented (in particular nothing falls back to the initial
+    rating).
+    """
+    failures = errors or {}
+    wanted = raw_player_id(player_id)
+    label = safe_label(player_label) or wanted
+    rows: list[dict[str, Any]] = []
+    for plan in plans:
+        row: dict[str, Any] = {
+            "window": plan.label,
+            "seasons": window_label(plan.years) if plan.years else "",
+            "status": "",
+            "player": label,
+            "rating": "",
+            "rank": "",
+            "matches": "",
+            "wins": "",
+            "losses": "",
+            "note": "",
+        }
+        if not plan.available:
+            row["status"] = "unavailable"
+            row["note"] = plan.reason
+        elif plan.size in failures:
+            row["status"] = "error"
+            row["note"] = safe_label(failures[plan.size])
+        elif not wanted:
+            row["status"] = "no player selected"
+            row["note"] = "Choose a player to see their per-window rating."
+        else:
+            stat = (players_by_window.get(plan.size) or {}).get(wanted)
+            if stat is None:
+                row["status"] = "not rated"
+                row["note"] = f"{label or wanted} has no eligible match in this window."
+            else:
+                rating = _as_float(stat.get("rating"))
+                rank = _as_int(stat.get("rank"), default=-1)
+                row["status"] = "rated"
+                row["rating"] = round(rating, 1) if rating is not None else ""
+                row["rank"] = rank if rank >= 0 else ""
+                row["matches"] = _as_int(stat.get("matches"))
+                row["wins"] = _as_int(stat.get("wins"))
+                row["losses"] = _as_int(stat.get("losses"))
         rows.append(row)
     return tuple(rows)
 
@@ -575,21 +680,41 @@ def player_history_rows(
 def elo_chart_rows(
     history_rows: Iterable[Mapping[str, Any]], player_id: str
 ) -> tuple[dict[str, Any], ...]:
-    """Chart points (ISO date, rounded post-match Elo) for one player."""
+    """Chart points for one player: one temporal point per match, rounded Elo.
+
+    ``match_date`` is a timezone-aware UTC ``datetime`` built from the match
+    timestamp, so several matches on the same calendar day stay distinct and in
+    chronological (timestamp, match_id) order.
+    """
     points: list[dict[str, Any]] = []
     for row in player_history_rows(history_rows, player_id):
         rating = _as_float(row.get("rating_after"))
-        if rating is None:
+        moment = timestamp_to_datetime_utc(row.get("timestamp"))
+        if rating is None or moment is None:
             continue
         points.append(
             {
-                "date": row["date"],
+                "match_date": moment,
                 "rating": round(rating, 1),
                 "match_id": safe_label(row.get("match_id")),
                 "opponent": row["opponent"],
             }
         )
     return tuple(points)
+
+
+def timestamp_to_datetime_utc(value: Any) -> datetime | None:
+    """Timezone-aware UTC datetime for a Unix timestamp, or ``None``."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def timestamp_to_iso_date(value: Any) -> str:
