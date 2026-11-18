@@ -16,6 +16,8 @@ and pandas (see the design spec).
 from __future__ import annotations
 
 import os
+import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from tennis_elo import telemetry
 from tennis_elo.dashboard_views import (
     CLASSIFICATION_COLUMNS,
     COEFFICIENT_COLUMNS,
@@ -345,6 +348,21 @@ def _signature(state: Mapping[str, Any]) -> tuple[Any, ...]:
     return (state["input_dir"], state["selected"], state["config"])
 
 
+def _telemetry_tags() -> list[str]:
+    """Per-session Datadog tags; telemetry is a no-op without a DD API key."""
+    session_id = st.session_state.get("telemetry_session_id", "")
+    return [f"session_id:{session_id}"] if session_id else []
+
+
+def _track_session() -> None:
+    """Emit one session-start log and a page-view metric on every rerun."""
+    if "telemetry_session_id" not in st.session_state:
+        st.session_state["telemetry_session_id"] = uuid.uuid4().hex
+        telemetry.send_log("dashboard session started", tags=_telemetry_tags())
+        telemetry.count("tennis_elo.sessions", tags=_telemetry_tags())
+    telemetry.count("tennis_elo.page_views", tags=_telemetry_tags())
+
+
 def _run_calculation(state: Mapping[str, Any]) -> None:
     st.session_state["run"] = None
     st.session_state["comparison"] = None
@@ -360,6 +378,7 @@ def _run_calculation(state: Mapping[str, Any]) -> None:
 
     try:
         with st.spinner("Loading matches and replaying Elo..."):
+            started = time.monotonic()
             result = _calculate(
                 state["input_dir"],
                 state["selected"],
@@ -369,8 +388,31 @@ def _run_calculation(state: Mapping[str, Any]) -> None:
             ranking_rows = _ranking_rows(result)
             history_rows = _history_rows(result)
     except RUNTIME_ERRORS as exc:  # user-facing message instead of a traceback
+        telemetry.count("tennis_elo.run_errors", tags=_telemetry_tags())
+        telemetry.send_log(
+            f"calculation failed: {exc}",
+            status="warning",
+            tags=_telemetry_tags(),
+            attrs={
+                "seasons": list(state["selected"]),
+                "error_type": type(exc).__name__,
+            },
+        )
         st.session_state["run_error"] = error_message(exc)
         return
+
+    telemetry.count("tennis_elo.runs", tags=_telemetry_tags())
+    telemetry.send_log(
+        "calculation finished",
+        tags=_telemetry_tags(),
+        attrs={
+            "seasons": list(result.seasons),
+            "matches": result.ratings.matches_processed,
+            "players": len(result.ratings.players),
+            "min_matches": state["min_matches"],
+            "duration_seconds": round(time.monotonic() - started, 3),
+        },
+    )
 
     st.session_state["run_error"] = None
     st.session_state["run"] = {
@@ -772,6 +814,7 @@ def main() -> None:
     """Render the dashboard (Streamlit executes this file top to bottom)."""
     st.set_page_config(page_title="Tennis Elo dashboard", page_icon="🎾", layout="wide")
     _initialise_state()
+    _track_session()
 
     st.title("Tennis Elo")
     st.caption(

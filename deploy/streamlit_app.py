@@ -8,6 +8,11 @@ cannot point the server at other folders.
 
 Run the same thing locally with ``uv run --extra dashboard streamlit run
 deploy/streamlit_app.py``.
+
+Optional telemetry: add a ``DD_API_KEY`` (and optionally ``DD_SITE``) secret in
+Community Cloud under Settings -> Secrets, and the dashboard ships session,
+page-view, run and error events to Datadog. Without the secret, telemetry is a
+silent no-op.
 """
 
 from __future__ import annotations
@@ -21,7 +26,20 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+import streamlit as st
+
 from tennis_elo.dashboard_views import DATA_DIR_ENV
+
+# Forward Datadog telemetry secrets onto the environment before the dashboard
+# modules read them. Missing secrets (no secrets.toml at all) raise, so guard
+# the lookup; without the key, telemetry stays disabled.
+for secret_key in ("DD_API_KEY", "DD_SITE"):
+    try:
+        value = st.secrets.get(secret_key)
+    except Exception:  # noqa: S112,BLE001 - optional config, absence is fine
+        continue
+    if value and not os.environ.get(secret_key):
+        os.environ[secret_key] = str(value)
 
 # An explicit (non-blank) value, e.g. from Community Cloud secrets, still wins.
 if not os.environ.get(DATA_DIR_ENV, "").strip():
