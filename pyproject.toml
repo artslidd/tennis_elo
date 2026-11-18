@@ -1,0 +1,31 @@
+[project]
+name = "tennis-elo"
+version = "0.1.0"
+description = "Reproducible tennis Elo ratings, CLI, and optional web dashboard"
+readme = "README.md"
+authors = [
+    { name = "Arthur Belleville", email = "arthur.belleville@datadoghq.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.40,<2", "pandas>=2.2,<4"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+
+[project.scripts]
+tennis-elo = "tennis_elo.cli:main"
+tennis-elo-dashboard = "tennis_elo.dashboard_launcher:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
