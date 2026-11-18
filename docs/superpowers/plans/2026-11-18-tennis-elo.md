@@ -12,6 +12,21 @@
 
 ---
 
+## Execution status
+
+- [x] Baseline and shared contracts committed; four isolated implementation worktrees created.
+- [x] DeepSeek V4.1 Flash workers implemented data, engine, API/CLI, and dashboard lanes.
+- [x] P0 integrated before P1; strict season/timestamp validation regressions fixed.
+- [x] Initial integrated verification: 279 tests passed, Ruff clean, source/wheel builds passed.
+- [x] Real-data CLI and interactive dashboard checks passed for all three window sizes.
+- [x] Isolated base install and bounded localhost server health/cleanup checks passed.
+- [ ] Review follow-ups integrated and reverified (history-export guard landed; structural CSV validation and reporting metadata under review).
+- [ ] Independent Opus 5.5 acceptance: core, API/CLI, dashboard (reviews in progress).
+- [ ] Final full-suite/build/smoke verification and delivery report.
+
+Reviewer policy: implementation workers stay on DeepSeek V4.1 Flash; independent
+acceptance reviewers must use Opus 5.5. Superseded DeepSeek approvals do not count.
+
 ## Chunk 1: Baseline and parallel foundations
 
 ### Task 1: Parent-owned immutable contracts and baseline

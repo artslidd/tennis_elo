@@ -6,6 +6,8 @@ P0 is a reusable Python package plus CLI. P1 is a local Streamlit web dashboard.
 The operator approved implementing both using parallel DeepSeek V4.1 Flash workers
 in separate project-local `.worktrees/` directories. The parent integrates P0
 before P1, reviews the combined changes, and performs final validation.
+Independent acceptance reviewers use **Opus 5.5**, as requested by the operator;
+implementation-worker or DeepSeek review approvals are not acceptance gates.
 
 ## Rating semantics
 
@@ -44,7 +46,12 @@ Deduplicate selected-season rows by match_id using all Elo-relevant columns
 them, and reject conflicting signatures; differences solely in unused betting,
 ranking or score statistics do not change the Elo input. Reject malformed
 eligible rows with file/row context (bad timestamp, missing IDs, same player on
-both sides, etc.). Timestamps must be integer seconds representable as a UTC
+both sides, etc.). Validate the CSV structure of every row before season selection
+or eligibility filtering: field counts must match the header, duplicate header
+columns are invalid, and malformed quoting, oversized fields and invalid UTF-8
+must become contextual ValueError messages rather than raw parser tracebacks.
+Properly quoted multiline fields remain supported. Timestamps must be integer
+seconds representable as a UTC
 Python datetime; reject millisecond epochs and out-of-range values rather than
 letting later exports fail. Season selections must contain actual integers, not
 booleans or coerced/truncated floats.
