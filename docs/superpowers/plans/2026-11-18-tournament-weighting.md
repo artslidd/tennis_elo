@@ -37,7 +37,7 @@ def coefficient_for_level(level: str) -> float:
 ```
 
 - [x] Full `uv run --locked --extra dashboard pytest -q`: 340 passed; `uv run --locked --extra dashboard ruff check .`: clean. Commit only explicit foundation/doc paths. Existing replay is temporarily unweighted until Task 3.
-- [ ] Create `.worktrees/weights-catalog`, `weights-engine`, `weights-cli`, `weights-dashboard` at the same foundation SHA on corresponding `workers/weights-*` branches. Leave all old worktrees and user CSVs untouched.
+- [x] Created `.worktrees/weights-catalog`, `weights-engine`, `weights-cli`, `weights-dashboard` at foundation `9f4f1ad` on corresponding `workers/weights-*` branches. Each exact worktree passed 340 tests and Ruff before its DeepSeek worker launched. Old worktrees and user CSVs untouched.
 
 ### Task 2: Catalog + loader (DeepSeek worker A)
 
@@ -53,11 +53,11 @@ def coefficient_for_level(level: str) -> float:
 
 **Exclusive files:** modify `src/tennis_elo/ratings.py`, `tests/test_ratings.py`; optionally create `tests/test_weighted_ratings.py`. Do not modify `elo.py` unless a demonstrated weighted bug requires it and parent agrees.
 
-- [ ] Write equal-rating tier tests (winner gains 12/16/20/24/28/32 for Challenger/250/500/Masters/Finals/Slam at baseK32) and record RED.
-- [ ] Per match ALWAYS validate with `coefficient_for_level(match.tournament_level)`, then use that coefficient when enabled or 1.0 when disabled; call the existing pure Elo update once with `config.k_factor * coefficient` for both sides. Test invalid categories in both modes. Shared config already rejects max-coefficient overflow before replay.
-- [ ] Fill classified level, APPLIED coefficient and actual effective K in both HistoryEntry records. Preserve raw IDs, precision, expected probabilities, chronology, names and counts.
-- [ ] Test mixed levels, custom base K, unweighted mode, history symmetry, conservation, deterministic/shuffled replay, fresh calls, invalid categories and effective-K overflow.
-- [ ] Run `uv run --locked --extra dashboard pytest tests/test_elo.py tests/test_ratings.py tests/test_weighted_ratings.py -q` (omit the latter if not created) and Ruff; commit owned files.
+- [x] Write equal-rating tier tests (winner gains 12/16/20/24/28/32 for Challenger/250/500/Masters/Finals/Slam at baseK32) and record RED: worker observed 43 failed / 7 existing-regression guards passed before implementation.
+- [x] Per match ALWAYS validate with `coefficient_for_level(match.tournament_level)`, then use that coefficient when enabled or 1.0 when disabled; call the existing pure Elo update once with `config.k_factor * coefficient` for both sides. Test invalid categories in both modes. Shared config already rejects max-coefficient overflow before replay.
+- [x] Fill classified level, APPLIED coefficient and actual effective K in both HistoryEntry records. Preserve raw IDs, precision, expected probabilities, chronology, names and counts.
+- [x] Test mixed levels, custom base K, unweighted mode, history symmetry, conservation, deterministic/shuffled replay, fresh calls, invalid categories and effective-K overflow.
+- [x] Worker `33230b5` integrated as `0fbd230`; parent reran `uv run --locked --extra dashboard pytest tests/test_elo.py tests/test_ratings.py tests/test_weighted_ratings.py -q`: 130 passed; Ruff clean. Worker full suite: 390 passed. Opus foundation/math spec-then-quality review requested at frozen `0fbd230`; catalog acceptance remains pending.
 
 ### Task 4: CLI + exports (DeepSeek worker C)
 
@@ -105,7 +105,14 @@ def coefficient_for_level(level: str) -> float:
 - [x] Operator chose simple tiers and Challenger coefficient 0.75.
 - [x] Season-upgrade and 2026-calendar source evidence collected from official ATP publications.
 - [x] Opus 5.5 approved plan/spec and shared foundation design. Incorporated canonical validation in both modes, proactive effective-K overflow validation, and explicit Slam-qualifying coefficient 2.00 (already part of the selected parent-category policy).
-- [ ] Shared foundation committed.
+- [x] Shared foundation committed at `9f4f1ad`; 340 tests and Ruff clean.
+- [x] Four DeepSeek V4.1 Flash workers launched via Studio: catalog `e7aa36ec-e3d7-43c3-a43f-dd8c29ae013c`; engine `d95747c3-7e78-4ab4-ae97-517cad11978e`; CLI `e0abc52f-f5bb-4bd8-8abe-0653c1cf6cbe`; dashboard `05003d6d-b4f2-40e1-b560-6cac96ea6566`.
+- [x] Parent-owned all-tier subprocess regressions added to `tests/test_integration.py` and observed RED before lane integration: weighted mode lacks warnings/weighted metadata; classic mode lacks `--unweighted`. Existing five malformed-CSV subprocess tests remain green. New tests intentionally remain pending sibling integration.
 - [x] Captured pre-feature classic-Elo baselines for all nine windows at `.worktrees/weighting-baseline-2eie9qqp`: full-precision players, rankings CSVs, legacy history hashes, and input SHA256 manifest.
 - [ ] Four isolated implementation workers complete.
+  - [x] Engine worker `01a1ee39-4457-72cf-8a5f-be0cb60c69e4`: `33230b5` → integrated `0fbd230`; parent 130 target tests/Ruff passed; Opus foundation/math review running.
+  - [x] CLI worker `01a1ee39-43a3-73c9-8cc8-096c478443fd`: `7ee36d0` → integrated `01ed775`; parent 83 CLI/export tests/Ruff passed; Opus CLI/export review requested. Classification notices use stdout, with visible unknown/fallback1 content; no literal 'warning' prefix required.
+  - [ ] Catalog/loader worker delivery.
+  - [ ] Dashboard worker delivery.
 - [ ] Integration and independent Opus acceptance complete.
+- [x] Original P1 UI received final Opus 5.5 spec/quality approval at `a1b9823` (315 tests, no skips, real-API scenarios, headless health/cleanup); original P0/P1 acceptance gates now pass. This is not acceptance of the new weighting deltas.

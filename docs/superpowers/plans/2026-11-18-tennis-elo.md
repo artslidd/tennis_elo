@@ -24,7 +24,7 @@
 - [x] Opus 5.5 API/CLI/export spec and quality approval at `4e16e0d`; all findings resolved.
 - [x] Opus 5.5 core/data/math spec and quality approval at `4e16e0d`; P0 has no blocking findings. Parent rerun: 251 P0 tests passed, Ruff clean, wheel/source builds passed.
 - [x] P1 revisions integrated at `a1b9823`: stable-ID selection, carry/reset wording, selected-player window comparison, directory presets, and temporal chart. Parent verification: 315 tests passed, Ruff clean, real-API synthetic UI scenarios passed.
-- [ ] Opus 5.5 dashboard spec and quality re-approval.
+- [x] Opus 5.5 dashboard spec and quality approval at `a1b9823`: 315 tests, Ruff/format clean, independent real-API AppTest regressions and bounded launcher health/cleanup passed; no blocking findings. Subsequent tournament-weighting feature is tracked in its separate plan.
 - [ ] Final full-suite/build/smoke verification and delivery report.
 
 Reviewer policy: implementation workers stay on DeepSeek V4.1 Flash; independent
