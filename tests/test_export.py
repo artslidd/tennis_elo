@@ -361,3 +361,58 @@ def test_write_outputs_allows_history_request_with_zero_eligible_matches(tmp_pat
     assert written["history"].read_text(encoding="utf-8") == HISTORY_HEADER + "\n"
     summary = json.loads(written["summary"].read_text(encoding="utf-8"))
     assert summary["history_included"] is True
+
+
+def test_write_outputs_rejects_negative_min_matches_before_creating_dir(tmp_path):
+    from tennis_elo.export import write_outputs
+
+    target = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="min_matches"):
+        write_outputs(build_result(), target, min_matches=-1)
+
+    assert not target.exists()
+
+
+def test_write_outputs_negative_min_matches_leaves_existing_empty_dir_unchanged(tmp_path):
+    from tennis_elo.export import write_outputs
+
+    with pytest.raises(ValueError, match="min_matches"):
+        write_outputs(build_result(), tmp_path, min_matches=-1)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_outputs_records_reporting_selection(tmp_path):
+    from tennis_elo.export import summary_dict, write_outputs
+
+    written = write_outputs(build_result(), tmp_path, min_matches=2)
+    summary = json.loads(written["summary"].read_text(encoding="utf-8"))
+
+    assert summary["reporting"] == {"min_matches": 2, "ranking_rows": 2}
+    # summary_dict has no filter parameter, so it stays unchanged.
+    assert "reporting" not in summary_dict(build_result())
+
+
+def test_write_outputs_reporting_counts_and_ratings_are_filter_independent(tmp_path):
+    from tennis_elo.export import write_outputs
+
+    unfiltered_dir = tmp_path / "all"
+    filtered_dir = tmp_path / "filtered"
+    write_outputs(build_result(), unfiltered_dir)
+    write_outputs(build_result(), filtered_dir, min_matches=2)
+
+    all_summary = json.loads((unfiltered_dir / "summary.json").read_text(encoding="utf-8"))
+    filtered_summary = json.loads((filtered_dir / "summary.json").read_text(encoding="utf-8"))
+    assert all_summary["reporting"] == {"min_matches": 0, "ranking_rows": 3}
+    assert filtered_summary["reporting"] == {"min_matches": 2, "ranking_rows": 2}
+
+    def ratings(directory):
+        text = (directory / "rankings.csv").read_text(encoding="utf-8")
+        return {row["player_id"]: row["rating"] for row in csv.DictReader(io.StringIO(text))}
+
+    all_ratings = ratings(unfiltered_dir)
+    filtered_ratings = ratings(filtered_dir)
+    assert set(filtered_ratings) == {"p1", "p3"}
+    # Presentation filtering never changes Elo values.
+    assert filtered_ratings == {player_id: all_ratings[player_id] for player_id in filtered_ratings}

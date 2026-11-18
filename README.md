@@ -48,7 +48,8 @@ uv run tennis-elo rank --seasons 2024 2025 2026 \
 `python -m tennis_elo` works exactly like the `tennis-elo` console script:
 
 ```bash
-uv run python -m tennis_elo rank --seasons 2025 2026 --history
+uv run python -m tennis_elo rank --seasons 2025 2026 --history \
+  --output-dir outputs/2025-2026-python-m
 ```
 
 ## Fresh-start reset semantics
@@ -121,8 +122,12 @@ Each run writes into a fresh directory:
   with every history field plus a UTC `date` column.
 - `summary.json` — `seasons`, `configuration`, `input_files`,
   `available_seasons`, `rows_read`, `selected_rows`, `matches_processed`,
-  `players_rated`, `duplicate_rows`, `excluded_counts`, `history_included`, and
-  the explicit fresh-start fields.
+  `players_rated`, `duplicate_rows`, `excluded_counts`, `history_included`,
+  `reporting`, and the explicit fresh-start fields.
+
+`reporting` records the presentation selection actually written: `min_matches`
+and the real `ranking_rows` exported. It makes a filtered export reproducible
+and never affects Elo ratings.
 
 Elo keeps full precision while matches are replayed; rounding to two decimals
 for ratings (and four for expected scores in history) happens only when writing
@@ -145,10 +150,10 @@ write the valid header-only file.
 ```python
 from tennis_elo import RatingConfig, available_seasons, calculate, write_outputs
 
-print(available_seasons("data"))          # (2024, 2025, 2026)
+print(available_seasons("."))          # (2024, 2025, 2026) in the repo root
 
 result = calculate(
-    "data",
+    ".",
     [2025, 2026],
     config=RatingConfig(initial_rating=1500, k_factor=32, include_retirements=True),
     include_history=True,

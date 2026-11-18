@@ -218,11 +218,18 @@ def write_outputs(
     recalculate with ``include_history=True``. A run with zero eligible matches
     is still allowed to request history and write the valid header-only file.
 
+    The written summary records the presentation selection under ``reporting``
+    (``min_matches`` and the actual ``ranking_rows`` exported) so a filtered
+    export is reproducible. ``min_matches`` never changes Elo ratings.
+
     Raises:
-        ValueError: when history is requested but was not calculated.
+        ValueError: when history is requested but was not calculated, or when
+            ``min_matches`` is negative.
         FileExistsError: when ``output_dir`` is not an empty directory.
     """
 
+    if min_matches < 0:
+        raise ValueError("min_matches must be greater than or equal to zero")
     if include_history and result.ratings.matches_processed > 0 and not result.ratings.history:
         raise ValueError(
             "include_history=True but the calculation has no history entries; "
@@ -232,9 +239,10 @@ def write_outputs(
     directory = Path(output_dir)
     _prepare_output_dir(directory)
 
+    rows = ranking_rows(result, min_matches=min_matches)
     written: dict[str, Path] = {}
     rankings_path = directory / "rankings.csv"
-    _write_text(rankings_path, rankings_csv(result, min_matches=min_matches))
+    _write_text(rankings_path, _rows_to_csv(RANKING_FIELDS, rows))
     written["rankings"] = rankings_path
 
     if include_history:
@@ -244,6 +252,7 @@ def write_outputs(
 
     summary = summary_dict(result)
     summary["history_included"] = include_history
+    summary["reporting"] = {"min_matches": min_matches, "ranking_rows": len(rows)}
     summary_path = directory / "summary.json"
     _write_text(summary_path, json.dumps(summary, indent=2) + "\n")
     written["summary"] = summary_path
