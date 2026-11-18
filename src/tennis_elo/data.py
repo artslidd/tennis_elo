@@ -10,7 +10,6 @@ from __future__ import annotations
 import csv
 import itertools
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
@@ -120,40 +119,38 @@ def load_matches(
     matches: list[Match] = []
 
     for path in path_list:
-        with _open_csv(path) as reader:
-            for row in reader:
-                rows_read += 1
-                line = reader.line_num
-                season = _parse_season_year(row, path, line)
-                available.add(season)
-                if season not in selected:
+        for row, line in _iter_rows(path):
+            rows_read += 1
+            season = _parse_season_year(row, path, line)
+            available.add(season)
+            if season not in selected:
+                continue
+
+            selected_rows += 1
+            context = f"{path}:{line}"
+            signature = _row_signature(row)
+            match_id = signature[0]
+            if not match_id:
+                raise ValueError(f"{context}: malformed eligible row: missing match_id")
+
+            previous = seen_signatures.get(match_id)
+            if previous is not None:
+                if previous == signature:
+                    duplicate_rows += 1
                     continue
+                raise ValueError(
+                    f"{context}: conflicting duplicate match_id {match_id!r} "
+                    f"(first seen at {seen_context[match_id]})"
+                )
+            seen_signatures[match_id] = signature
+            seen_context[match_id] = context
 
-                selected_rows += 1
-                context = f"{path}:{line}"
-                signature = _row_signature(row)
-                match_id = signature[0]
-                if not match_id:
-                    raise ValueError(f"{context}: malformed eligible row: missing match_id")
+            reason = _exclusion_reason(row, include_retirements=include_retirements)
+            if reason is not None:
+                excluded[reason] = excluded.get(reason, 0) + 1
+                continue
 
-                previous = seen_signatures.get(match_id)
-                if previous is not None:
-                    if previous == signature:
-                        duplicate_rows += 1
-                        continue
-                    raise ValueError(
-                        f"{context}: conflicting duplicate match_id {match_id!r} "
-                        f"(first seen at {seen_context[match_id]})"
-                    )
-                seen_signatures[match_id] = signature
-                seen_context[match_id] = context
-
-                reason = _exclusion_reason(row, include_retirements=include_retirements)
-                if reason is not None:
-                    excluded[reason] = excluded.get(reason, 0) + 1
-                    continue
-
-                matches.append(_build_match(row, season, path, line))
+            matches.append(_build_match(row, season, path, line))
 
     missing = sorted(set(selected) - available)
     if missing:
@@ -184,33 +181,70 @@ def load_matches(
 # --------------------------------------------------------------------------- #
 
 
-@contextmanager
-def _open_csv(path: Path) -> Iterator[csv.DictReader]:
-    """Open *path* as UTF-8 (with BOM support) and validate the header."""
+def _iter_rows(path: Path) -> Iterator[tuple[dict[str, str], int]]:
+    """Yield ``(row, line)`` for every structurally valid data row.
+
+    Row width is validated before any caller sees a row, so the CSV parser can
+    never pad missing fields with ``None`` or hide extra fields under ``None``.
+    Malformed quoting, oversized fields, and invalid UTF-8 surface as a
+    contextual ``ValueError`` instead of a raw ``csv.Error`` or decode error.
+    """
     try:
         handle = path.open("r", encoding="utf-8-sig", newline="")
     except OSError as exc:
         raise OSError(f"cannot read {path}: {exc}") from exc
 
     with handle:
-        reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames
-        if fieldnames is None:
-            raise ValueError(f"{path}:1: malformed schema: empty CSV file, missing header row")
-        missing = [column for column in REQUIRED_COLUMNS if column not in fieldnames]
-        if missing:
-            raise ValueError(
-                f"{path}:1: malformed schema: missing required column(s): {', '.join(missing)}"
-            )
-        yield reader
+        # strict=True rejects unbalanced quotes, including an unterminated quote
+        # at end of file that the default parser silently accepts.
+        reader = csv.reader(handle, strict=True)
+        fieldnames = _read_header(path, reader)
+        expected = len(fieldnames)
+        while True:
+            try:
+                values = next(reader)
+            except StopIteration:
+                return
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    f"{path}:{reader.line_num or 1}: malformed CSV: invalid UTF-8 ({exc})"
+                ) from exc
+            except csv.Error as exc:
+                raise ValueError(f"{path}:{reader.line_num}: malformed CSV row: {exc}") from exc
+            line = reader.line_num
+            if len(values) != expected:
+                raise ValueError(
+                    f"{path}:{line}: malformed CSV row: expected {expected} fields, "
+                    f"got {len(values)} fields"
+                )
+            yield dict(zip(fieldnames, values)), line
+
+
+def _read_header(path: Path, reader: Iterator[list[str]]) -> list[str]:
+    try:
+        fieldnames = next(reader)
+    except StopIteration:
+        raise ValueError(f"{path}:1: malformed schema: empty CSV file, missing header row") from None
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path}:1: malformed schema: invalid UTF-8 in header ({exc})") from exc
+    except csv.Error as exc:
+        raise ValueError(f"{path}:1: malformed schema: {exc}") from exc
+
+    missing = [column for column in REQUIRED_COLUMNS if column not in fieldnames]
+    if missing:
+        raise ValueError(
+            f"{path}:1: malformed schema: missing required column(s): {', '.join(missing)}"
+        )
+    duplicates = sorted({name for name in fieldnames if fieldnames.count(name) > 1})
+    if duplicates:
+        raise ValueError(
+            f"{path}:1: malformed schema: duplicate column(s): {', '.join(duplicates)}"
+        )
+    return fieldnames
 
 
 def _read_season_years(path: Path) -> list[int]:
-    years: list[int] = []
-    with _open_csv(path) as reader:
-        for row in reader:
-            years.append(_parse_season_year(row, path, reader.line_num))
-    return years
+    return [_parse_season_year(row, path, line) for row, line in _iter_rows(path)]
 
 
 def _parse_season_year(row: dict[str, str], path: Path, line: int) -> int:
@@ -285,8 +319,7 @@ def _check_timestamp_representable(timestamp: int, raw: str, context: str) -> No
 
 
 def _field(row: dict[str, str], key: str) -> str:
-    value = row.get(key)
-    return "" if value is None else value.strip()
+    return row.get(key, "").strip()
 
 
 def _row_signature(row: dict[str, str]) -> tuple[str, ...]:

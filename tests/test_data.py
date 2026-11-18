@@ -60,6 +60,128 @@ def write_season_csv(path, rows, *, encoding="utf-8", columns=COLUMNS):
     return path
 
 
+# A 49-column schema mirroring the real *-atp-season.csv layout. Used to pin
+# structural corruption (missing/extra fields, broken quoting) that the frozen
+# 14-column helper above cannot express.
+WIDE_COLUMNS = [
+    "match_id",
+    "season_year",
+    "tour_type",
+    "tour_type_human",
+    "date_timestamp",
+    "date_human",
+    "tournament",
+    "round",
+    "surface",
+    "surface_id",
+    "status",
+    "status_extra",
+    "home_name",
+    "away_name",
+    "home_id",
+    "away_id",
+    "home_rank",
+    "away_rank",
+    "home_points",
+    "away_points",
+    "winner_code",
+    "home_set_score",
+    "away_set_score",
+    "home_set_1_score",
+    "away_set_1_score",
+    "home_set_2_score",
+    "away_set_2_score",
+    "home_set_3_score",
+    "away_set_3_score",
+    "home_set_4_score",
+    "away_set_4_score",
+    "home_set_5_score",
+    "away_set_5_score",
+    "home_odds_match_winner",
+    "away_odds_match_winner",
+    "home_odds_first_set_winner",
+    "away_odds_first_set_winner",
+    "home_aces",
+    "away_aces",
+    "home_double_faults",
+    "away_double_faults",
+    "home_service_points_won_perc",
+    "away_service_points_won_perc",
+    "home_return_points_won_perc",
+    "away_return_points_won_perc",
+    "home_break_points_won_perc",
+    "away_break_points_won_perc",
+    "home_break_points_saved_perc",
+    "away_break_points_saved_perc",
+]
+
+WIDE_DEFAULTS = {
+    "match_id": "75191598",
+    "season_year": "2024",
+    "tour_type": "1",
+    "tour_type_human": "ATP Tour",
+    "date_timestamp": DEC_2023,
+    "date_human": "29 Dec 2023",
+    "tournament": "United Cup ATP",
+    "round": "",
+    "surface": "hard",
+    "surface_id": "1",
+    "status": "FINISHED",
+    "status_extra": "FINISHED",
+    "home_name": "Home Player",
+    "away_name": "Away Player",
+    "home_id": "292653",
+    "away_id": "956292",
+    "home_rank": "36",
+    "away_rank": "45",
+    "home_points": "1395",
+    "away_points": "1155",
+    "winner_code": "2",
+}
+
+
+def wide_values(**overrides):
+    values = dict(WIDE_DEFAULTS)
+    values.update(overrides)
+    return [values.get(column, "0") for column in WIDE_COLUMNS]
+
+
+def write_wide_rows(path, value_rows, *, encoding="utf-8"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding=encoding, newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(WIDE_COLUMNS)
+        for values in value_rows:
+            writer.writerow(values)
+    return path
+
+
+def write_wide_raw(path, lines, *, encoding="utf-8"):
+    """Write a wide CSV with pre-built raw data lines (for corrupt fixtures)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = ",".join(WIDE_COLUMNS) + "\n" + "\n".join(lines) + "\n"
+    path.write_text(body, encoding=encoding, newline="")
+    return path
+
+
+def assert_both_loaders_reject(tmp_path, path, *, expect_width=None):
+    """Both entry points must reject a structural defect with file context."""
+    for label, call in (
+        ("load_matches", lambda: load_matches([path], [2024])),
+        ("available_seasons", lambda: available_seasons(tmp_path)),
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            call()
+        message = str(excinfo.value)
+        assert path.name in message, label
+        assert ":2" in message, label
+        assert "invalid_winner" not in message, label
+        if expect_width is not None:
+            expected, actual = expect_width
+            assert f"expected {expected} fields" in message, label
+            assert f"got {actual} fields" in message, label
+
+
 def assert_accounting(result: LoadResult) -> None:
     assert result.selected_rows == (
         len(result.matches) + sum(result.excluded_counts.values()) + result.duplicate_rows
@@ -701,3 +823,116 @@ def test_whitespace_fields_are_stripped(tmp_path):
     assert match.match_id == "s1"
     assert match.home_id == "p1"
     assert match.round == "R16"
+
+
+# --------------------------------------------------------------------------- #
+# Structural CSV integrity (missing/extra fields, malformed quoting)
+# --------------------------------------------------------------------------- #
+
+
+def test_wide_schema_sanity_check():
+    assert len(WIDE_COLUMNS) == 49
+
+
+def test_valid_wide_row_loads(tmp_path):
+    path = write_wide_rows(tmp_path / "valid-atp-season.csv", [wide_values()])
+    (match,) = load_matches([path], [2024]).matches
+    assert match.match_id == "75191598"
+    assert match.home_id == "292653"
+    assert match.away_id == "956292"
+    assert match.winner_code == 2
+    assert available_seasons(tmp_path) == (2024,)
+
+
+def test_missing_closing_quote_48_fields_rejected(tmp_path):
+    # An opening quote on `tournament` and a stray closing quote on `round` merge
+    # two fields: the row parses as 48 of 49 columns, previously reading "26" as a
+    # phantom home/away ID through DictReader's restval=None padding.
+    values = wide_values()
+    values[6] = '"United Cup ATP'
+    values[7] = 'R16"'
+    path = write_wide_raw(tmp_path / "missing-quote-atp-season.csv", [",".join(values)])
+    assert_both_loaders_reject(tmp_path, path, expect_width=(49, 48))
+
+
+def test_unquoted_comma_50_fields_rejected(tmp_path):
+    values = wide_values()
+    values[6] = "United Cup, ATP"
+    path = write_wide_raw(tmp_path / "extra-field-atp-season.csv", [",".join(values)])
+    assert_both_loaders_reject(tmp_path, path, expect_width=(49, 50))
+
+
+def test_truncated_finished_row_rejected_not_silently_excluded(tmp_path):
+    # Dropping the tail removes winner_code; before this fix it became "" and the
+    # finished match was silently counted as invalid_winner.
+    values = wide_values()[:20]
+    path = write_wide_raw(tmp_path / "truncated-atp-season.csv", [",".join(values)])
+    assert_both_loaders_reject(tmp_path, path, expect_width=(49, 20))
+    with pytest.raises(ValueError) as excinfo:
+        load_matches([path], [2024])
+    assert "invalid_winner" not in str(excinfo.value)
+
+
+def test_unterminated_quote_at_eof_rejected(tmp_path):
+    values = wide_values()
+    values[-1] = '"unterminated'
+    path = write_wide_raw(tmp_path / "unterminated-atp-season.csv", [",".join(values)])
+    assert_both_loaders_reject(tmp_path, path)
+
+
+def test_oversized_quoted_field_rejected(tmp_path):
+    values = wide_values()
+    values[6] = '"' + ("x" * 140_000) + '"'
+    path = write_wide_raw(tmp_path / "oversized-atp-season.csv", [",".join(values)])
+    assert_both_loaders_reject(tmp_path, path)
+
+
+def test_quoted_multiline_field_still_supported(tmp_path):
+    path = write_wide_rows(
+        tmp_path / "multiline-atp-season.csv",
+        [wide_values(tournament="United Cup\nATP", round="R16")],
+    )
+    (match,) = load_matches([path], [2024]).matches
+    assert match.tournament == "United Cup\nATP"
+    assert available_seasons(tmp_path) == (2024,)
+
+
+def test_correct_width_excluded_row_with_bad_timestamp_still_ignored(tmp_path):
+    path = write_wide_rows(
+        tmp_path / "canceled-wide-atp-season.csv",
+        [wide_values(status_extra="CANCELED", date_timestamp="not-a-timestamp")],
+    )
+    result = load_matches([path], [2024])
+    assert result.matches == ()
+    assert result.excluded_counts == {"canceled": 1}
+    assert_accounting(result)
+
+
+def test_invalid_utf8_rejected_with_file_context(tmp_path):
+    path = tmp_path / "invalid-utf8-atp-season.csv"
+    body = (
+        ",".join(WIDE_COLUMNS).encode("utf-8")
+        + b"\n"
+        + ",".join(wide_values()).encode("utf-8")
+        + b"\xc3\x28\n"
+    )
+    path.write_bytes(body)
+    for call in (
+        lambda: load_matches([path], [2024]),
+        lambda: available_seasons(tmp_path),
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            call()
+        assert "invalid-utf8-atp-season.csv" in str(excinfo.value)
+
+
+def test_duplicate_header_rejected(tmp_path):
+    header = list(WIDE_COLUMNS)
+    header[-1] = "match_id"
+    path = tmp_path / "duplicate-header-atp-season.csv"
+    path.write_text(",".join(header) + "\n" + ",".join(wide_values()) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        load_matches([path], [2024])
+    message = str(excinfo.value)
+    assert "duplicate" in message
+    assert "match_id" in message
