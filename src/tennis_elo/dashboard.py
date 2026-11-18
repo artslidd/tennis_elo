@@ -23,6 +23,8 @@ import pandas as pd
 import streamlit as st
 
 from tennis_elo.dashboard_views import (
+    CLASSIFICATION_COLUMNS,
+    COEFFICIENT_COLUMNS,
     COMPARISON_COLUMNS,
     DEFAULT_INITIAL_RATING,
     DEFAULT_K_FACTOR,
@@ -30,8 +32,10 @@ from tennis_elo.dashboard_views import (
     HISTORY_COLUMNS,
     LEADERBOARD_COLUMNS,
     PLAYER_COMPARISON_COLUMNS,
+    UNKNOWN_TOURNAMENT_COLUMNS,
     build_player_options,
     build_rating_config,
+    coefficient_rows,
     comparison_entry,
     comparison_rows,
     control_error,
@@ -54,6 +58,7 @@ from tennis_elo.dashboard_views import (
     season_selection_problem,
     season_window_plan,
     sort_ranking_rows,
+    tournament_weighting_report,
     window_label,
     window_plans,
 )
@@ -111,6 +116,25 @@ def _history_csv(result: Any) -> str:
     from tennis_elo.export import history_csv
 
     return history_csv(result)
+
+
+def _summary_dict(result: Any) -> Mapping[str, Any] | None:
+    """Fetch the run summary when the export lane provides one.
+
+    The summary carries the optional ``tournament_weighting`` classification section.
+    It is presentation-only metadata: if an older export module (or a test fake) has no
+    ``summary_dict``, or the call fails, the run still renders and the weighting report
+    just reports that the section is unavailable.
+    """
+    try:
+        from tennis_elo.export import summary_dict
+    except RUNTIME_ERRORS:
+        return None
+    try:
+        summary = summary_dict(result)
+    except RUNTIME_ERRORS:
+        return None
+    return summary if isinstance(summary, Mapping) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -230,9 +254,20 @@ def _sidebar() -> dict[str, Any]:
         value=DEFAULT_K_FACTOR,
         step=0.5,
         key="k_factor",
+        help="Base K-factor. With tournament weights on, each match's effective K is "
+        "this base K x the tournament coefficient.",
     )
     include_retirements = st.sidebar.checkbox(
         "Include retirements", value=True, key="include_retirements"
+    )
+    use_tournament_weights = st.sidebar.checkbox(
+        "Use tournament weights",
+        value=True,
+        key="use_tournament_weights",
+        help="On (default): each match's effective K = base K x the tournament coefficient "
+        "(Challenger 0.75, ATP 250 1.00, ATP 500 1.25, Masters 1000 1.50, ATP Finals "
+        "1.75, Grand Slam 2.00; team/nonstandard and unknown 1.00). Off: classic Elo, "
+        "where every match uses the base K as its effective K.",
     )
     min_matches = st.sidebar.number_input(
         "Minimum matches (leaderboard only)",
@@ -255,6 +290,7 @@ def _sidebar() -> dict[str, Any]:
             initial_rating=float(initial_rating),
             k_factor=float(k_factor),
             include_retirements=bool(include_retirements),
+            use_tournament_weights=bool(use_tournament_weights),
         )
     )
 
@@ -317,6 +353,8 @@ def _run_calculation(state: Mapping[str, Any]) -> None:
         "signature": _signature(state),
         "ranking_rows": ranking_rows,
         "history_rows": history_rows,
+        # Optional presentation metadata; ``None`` when the export lane has none.
+        "summary": _summary_dict(result),
     }
 
 
@@ -346,6 +384,48 @@ def _render_metadata(run: Mapping[str, Any]) -> None:
             "Consistency check: selected-season rows must equal rated matches plus "
             "excluded rows plus ignored duplicates."
         )
+
+
+def _render_weighting(run: Mapping[str, Any]) -> None:
+    """Show the active weighting model, its policy and any unknown fallback.
+
+    The mode, coefficient table and policy are always shown. Classification counts and
+    the unknown-tournament detail come from the run summary when it reports them; an
+    older summary is acknowledged explicitly instead of showing invented numbers.
+    """
+    report = tournament_weighting_report(run["result"], run.get("summary"))
+    st.subheader("Tournament weighting")
+    st.caption(report.mode_notice)
+    if report.unknown_notice:
+        st.warning(report.unknown_notice)
+
+    with st.expander("Coefficient policy and classification detail"):
+        st.markdown(report.policy_note)
+        coefficients = pd.DataFrame(list(coefficient_rows()), columns=list(COEFFICIENT_COLUMNS))
+        st.dataframe(
+            coefficients, key="weighting_coefficients", hide_index=True, width=DATAFRAME_WIDTH
+        )
+        if not report.reported:
+            st.info(report.absent_notice)
+            return
+        if report.matches_by_level:
+            st.markdown("**Matches by tournament level**")
+            st.dataframe(
+                pd.DataFrame(list(report.matches_by_level), columns=list(CLASSIFICATION_COLUMNS)),
+                key="weighting_levels",
+                hide_index=True,
+                width=DATAFRAME_WIDTH,
+            )
+        if report.unknown_tournaments:
+            st.markdown("**Unclassified tournaments (explicit `unknown` fallback)**")
+            st.dataframe(
+                pd.DataFrame(
+                    list(report.unknown_tournaments), columns=list(UNKNOWN_TOURNAMENT_COLUMNS)
+                ),
+                key="weighting_unknowns",
+                hide_index=True,
+                width=DATAFRAME_WIDTH,
+            )
 
 
 def _render_leaderboard(run: Mapping[str, Any], state: Mapping[str, Any]) -> None:
@@ -503,6 +583,7 @@ def _render_run(state: Mapping[str, Any]) -> None:
             "The controls changed since this calculation - press Calculate ratings to refresh."
         )
     _render_metadata(run)
+    _render_weighting(run)
     _render_leaderboard(run, state)
     _render_player(run)
 

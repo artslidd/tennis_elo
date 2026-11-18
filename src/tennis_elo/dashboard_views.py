@@ -17,11 +17,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite
+from types import MappingProxyType
 from typing import Any
 
 from .models import CalculationResult, LoadResult, RatingConfig
+from .weighting import TOURNAMENT_COEFFICIENTS
 
 __all__ = [
+    "CLASSIFICATION_COLUMNS",
+    "COEFFICIENT_COLUMNS",
     "COMPARISON_COLUMNS",
     "DEFAULT_INITIAL_RATING",
     "DEFAULT_K_FACTOR",
@@ -30,12 +34,16 @@ __all__ = [
     "LEADERBOARD_COLUMNS",
     "MISSING_DASHBOARD_DEPENDENCIES",
     "PLAYER_COMPARISON_COLUMNS",
+    "UNKNOWN_TOURNAMENT_COLUMNS",
+    "WEIGHTING_POLICY_NOTE",
     "WINDOW_SIZES",
     "LoadAccounting",
     "PlayerOption",
     "SeasonWindow",
+    "WeightingReport",
     "build_player_options",
     "build_rating_config",
+    "coefficient_rows",
     "comparison_entry",
     "comparison_rows",
     "control_error",
@@ -63,6 +71,8 @@ __all__ = [
     "sort_ranking_rows",
     "timestamp_to_datetime_utc",
     "timestamp_to_iso_date",
+    "tournament_weighting_report",
+    "weighting_mode_notice",
     "window_label",
     "window_plans",
 ]
@@ -87,6 +97,9 @@ HISTORY_COLUMNS: tuple[str, ...] = (
     "match_id",
     "season_year",
     "tournament",
+    "tournament_level",
+    "tournament_weight",
+    "effective_k_factor",
     "surface",
     "opponent",
     "won",
@@ -116,6 +129,34 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "top_player",
     "top_rating",
     "note",
+)
+COEFFICIENT_COLUMNS: tuple[str, ...] = ("level", "coefficient")
+CLASSIFICATION_COLUMNS: tuple[str, ...] = ("level", "matches")
+UNKNOWN_TOURNAMENT_COLUMNS: tuple[str, ...] = ("season_year", "tournament", "matches")
+
+# Human-readable tier names for the fixed canonical levels, in the operator's
+# approved order (ascending coefficient, with the two 1.00 fallbacks last).
+LEVEL_LABELS: Mapping[str, str] = MappingProxyType(
+    {
+        "challenger": "Challenger",
+        "atp_250": "ATP 250",
+        "atp_500": "ATP 500",
+        "masters_1000": "Masters 1000",
+        "atp_finals": "ATP Finals",
+        "grand_slam": "Grand Slam",
+        "other": "Other (team or nonstandard)",
+        "unknown": "Unknown (fallback)",
+    }
+)
+
+WEIGHTING_POLICY_NOTE = (
+    "Operator-selected policy: the coefficient multiplies the BASE K-factor for both "
+    "players (effective K = base K x coefficient); ratings and probabilities are never "
+    "scaled. Qualifying inherits its parent tournament's category, so Grand Slam "
+    "qualifying also uses 2.00. Team and nonstandard events (United Cup, Davis Cup, "
+    "Laver Cup, Olympics, Next Gen Finals) use other = 1.00. Labels that cannot be "
+    "classified use the explicit unknown fallback 1.00 and are reported here instead "
+    "of being silently treated as ATP 250."
 )
 
 FRESH_START_NOTICE = (
@@ -519,7 +560,13 @@ def run_metadata_rows(result: CalculationResult) -> tuple[dict[str, Any], ...]:
     rows = (
         ("Seasons", window_label(result.seasons)),
         ("Initial rating", f"{result.config.initial_rating:g}"),
-        ("K-factor", f"{result.config.k_factor:g}"),
+        ("Base K-factor", f"{result.config.k_factor:g}"),
+        (
+            "Tournament weighting",
+            "enabled (effective K = base K x tournament coefficient)"
+            if result.config.use_tournament_weights
+            else "disabled (classic Elo: effective K = base K)",
+        ),
         ("Retirements included", "yes" if result.config.include_retirements else "no"),
         ("Available seasons", ", ".join(str(year) for year in load.available_seasons) or "none"),
         ("Input files", ", ".join(safe_label(path) for path in load.input_files) or "none"),
@@ -532,6 +579,194 @@ def run_metadata_rows(result: CalculationResult) -> tuple[dict[str, Any], ...]:
         ("Accounting check", check),
     )
     return tuple({"field": name, "value": value} for name, value in rows)
+
+
+# --------------------------------------------------------------------------- #
+# Tournament weighting (policy, classification metadata, unknown fallback)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class WeightingReport:
+    """Everything the dashboard shows about the active tournament-weighting model.
+
+    ``enabled`` is always read from the frozen run configuration. The classification
+    fields come from the run summary's ``tournament_weighting`` section (the sibling
+    export contract) and stay empty when that section is absent, so an older summary
+    never produces invented counts.
+    """
+
+    enabled: bool
+    reported: bool
+    mode_notice: str
+    policy_note: str
+    matches_by_level: tuple[dict[str, Any], ...]
+    unknown_matches: int | None
+    unknown_tournaments: tuple[dict[str, Any], ...]
+    unknown_notice: str
+    absent_notice: str
+
+
+def coefficient_rows() -> tuple[dict[str, Any], ...]:
+    """The fixed coefficient table, in the approved canonical order."""
+    return tuple(
+        {"level": _level_label(level), "coefficient": coefficient}
+        for level, coefficient in TOURNAMENT_COEFFICIENTS.items()
+    )
+
+
+def weighting_mode_notice(enabled: bool) -> str:
+    """Explain the active model and how base K relates to the effective K."""
+    if enabled:
+        return (
+            "Tournament weighting is enabled: each match uses its effective K-factor, "
+            "effective K = base K x tournament coefficient, for both players. Ratings "
+            "and expected scores are never scaled, so updates stay zero-sum."
+        )
+    return (
+        "Tournament weighting is disabled: classic Elo. Every match uses the base "
+        "K-factor as its effective K; the tournament level is still recorded with "
+        "coefficient 1.00."
+    )
+
+
+def _level_label(level: Any) -> str:
+    text = safe_label(level)
+    if not text:
+        return ""
+    return LEVEL_LABELS.get(text, text)
+
+
+def _level_rank(label: str) -> int:
+    order = {LEVEL_LABELS[level]: rank for rank, level in enumerate(TOURNAMENT_COEFFICIENTS)}
+    return order.get(label, len(order))
+
+
+def _as_int_or_none(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _level_count_rows(value: Any) -> tuple[dict[str, Any], ...]:
+    """Normalize a ``matches_by_level`` summary value into display rows.
+
+    Accepts either a level-to-count mapping or a sequence of ``{level, matches}``
+    records; anything else yields no rows rather than invented data.
+    """
+    if isinstance(value, Mapping):
+        items: Iterable[tuple[Any, Any]] = value.items()
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        items = (
+            (record.get("level"), record.get("matches", record.get("count")))
+            for record in value
+            if isinstance(record, Mapping)
+        )
+    else:
+        return ()
+    counts: dict[str, int] = {}
+    for level, count in items:
+        key = safe_label(level)
+        if not key:
+            continue
+        counts[key] = counts.get(key, 0) + _as_int(count)
+    rows = [
+        {"level": _level_label(level), "matches": count} for level, count in counts.items()
+    ]
+    rows.sort(key=lambda row: (_level_rank(row["level"]), row["level"]))
+    return tuple(rows)
+
+
+def _unknown_tournament_rows(value: Any) -> tuple[dict[str, Any], ...]:
+    """Readable, deterministically sorted ``unknown_tournaments`` records."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    rows: list[dict[str, Any]] = []
+    for record in value:
+        if not isinstance(record, Mapping):
+            continue
+        year = _as_int_or_none(record.get("season_year"))
+        rows.append(
+            {
+                "season_year": year if year is not None else safe_label(record.get("season_year")),
+                "tournament": safe_label(record.get("tournament")) or "(unnamed event)",
+                "matches": _as_int(record.get("matches")),
+            }
+        )
+    rows.sort(key=_unknown_tournament_sort_key)
+    return tuple(rows)
+
+
+def _unknown_tournament_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    year = row.get("season_year")
+    name = safe_label(row.get("tournament")).casefold()
+    if isinstance(year, int):
+        return (0, year, name)
+    return (1, 0, f"{safe_label(year)} {name}")
+
+
+def tournament_weighting_report(
+    result: CalculationResult, summary: Mapping[str, Any] | None = None
+) -> WeightingReport:
+    """Summarize the active weighting model and the run's classification metadata.
+
+    The mode and policy always come from the run's frozen configuration and the
+    operator's fixed coefficient table. Classification counts, unknown counts and the
+    unknown tournament list come from the summary's ``tournament_weighting`` section;
+    when that section is missing (an older summary or test fake) they stay empty and
+    an explicit notice is shown instead of any made-up numbers.
+    """
+    enabled = bool(getattr(result.config, "use_tournament_weights", True))
+    mode_notice = weighting_mode_notice(enabled)
+    section: Mapping[str, Any] | None = None
+    if isinstance(summary, Mapping):
+        candidate = summary.get("tournament_weighting")
+        if isinstance(candidate, Mapping):
+            section = candidate
+    if section is None:
+        return WeightingReport(
+            enabled=enabled,
+            reported=False,
+            mode_notice=mode_notice,
+            policy_note=WEIGHTING_POLICY_NOTE,
+            matches_by_level=(),
+            unknown_matches=None,
+            unknown_tournaments=(),
+            unknown_notice="",
+            absent_notice=(
+                "This run's summary did not include tournament-weighting metadata, so "
+                "classification counts and unknown warnings are unavailable. The "
+                "coefficient policy below is still fixed and in force."
+            ),
+        )
+
+    unknown_tournaments = _unknown_tournament_rows(section.get("unknown_tournaments"))
+    unknown_matches = _as_int_or_none(section.get("unknown_matches"))
+    if unknown_matches is None:
+        unknown_matches = sum(row["matches"] for row in unknown_tournaments)
+    unknown_notice = ""
+    if unknown_matches > 0:
+        unknown_notice = (
+            f"{unknown_matches} match(es) used the explicit `unknown` fallback coefficient "
+            "1.00 because their tournament could not be classified. They are rated, not "
+            "excluded; the affected tournaments are listed below."
+        )
+        if not enabled:
+            unknown_notice += " Tournament weighting is off, so this does not change K."
+    return WeightingReport(
+        enabled=enabled,
+        reported=True,
+        mode_notice=mode_notice,
+        policy_note=WEIGHTING_POLICY_NOTE,
+        matches_by_level=_level_count_rows(section.get("matches_by_level")),
+        unknown_matches=unknown_matches,
+        unknown_tournaments=unknown_tournaments,
+        unknown_notice=unknown_notice,
+        absent_notice="",
+    )
 
 
 def comparison_entry(result: CalculationResult) -> dict[str, Any]:
@@ -661,7 +896,12 @@ def _history_sort_key(row: Mapping[str, Any]) -> tuple[int, str]:
 def player_history_rows(
     history_rows: Iterable[Mapping[str, Any]], player_id: str
 ) -> tuple[dict[str, Any], ...]:
-    """Chronological match history for one player, with readable display text."""
+    """Chronological match history for one player, with readable display text.
+
+    The recorded weighting metadata is passed through unchanged: the player's
+    tournament level, the applied coefficient and the actual effective K-factor.
+    A legacy row without those keys shows empty cells; nothing is fabricated.
+    """
     wanted = safe_label(player_id)
     if not wanted:
         return ()
@@ -673,6 +913,12 @@ def player_history_rows(
         row["surface"] = safe_label(row.get("surface"))
         row["opponent"] = safe_label(row.get("opponent_name")) or safe_label(row.get("opponent_id"))
         row["player_name"] = safe_label(row.get("player_name"))
+        level = row.get("tournament_level")
+        row["tournament_level"] = safe_label(level) if level is not None else ""
+        weight = _as_float(row.get("tournament_weight"))
+        row["tournament_weight"] = weight if weight is not None else ""
+        effective_k = _as_float(row.get("effective_k_factor"))
+        row["effective_k_factor"] = effective_k if effective_k is not None else ""
     selected.sort(key=_history_sort_key)
     return tuple(selected)
 
@@ -750,13 +996,23 @@ def control_error(*, initial_rating: Any, k_factor: Any) -> str | None:
 
 
 def build_rating_config(
-    *, initial_rating: float, k_factor: float, include_retirements: bool
+    *,
+    initial_rating: float,
+    k_factor: float,
+    include_retirements: bool,
+    use_tournament_weights: bool = True,
 ) -> RatingConfig:
-    """Build the shared rating configuration; the model validates the values."""
+    """Build the shared rating configuration; the model validates the values.
+
+    ``use_tournament_weights`` defaults to the shared contract's enabled default so
+    existing callers keep weighted behaviour. The value is passed through unchanged,
+    so the model's strict bool validation still applies.
+    """
     return RatingConfig(
         initial_rating=float(initial_rating),
         k_factor=float(k_factor),
         include_retirements=bool(include_retirements),
+        use_tournament_weights=use_tournament_weights,
     )
 
 

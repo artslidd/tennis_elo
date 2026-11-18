@@ -21,14 +21,18 @@ import pytest
 
 from tennis_elo import dashboard_launcher
 from tennis_elo.dashboard_views import (
+    CLASSIFICATION_COLUMNS,
+    COEFFICIENT_COLUMNS,
     COMPARISON_COLUMNS,
     FRESH_START_NOTICE,
     HISTORY_COLUMNS,
     LEADERBOARD_COLUMNS,
     MISSING_DASHBOARD_DEPENDENCIES,
     PLAYER_COMPARISON_COLUMNS,
+    UNKNOWN_TOURNAMENT_COLUMNS,
     build_player_options,
     build_rating_config,
+    coefficient_rows,
     comparison_entry,
     comparison_rows,
     control_error,
@@ -54,6 +58,8 @@ from tennis_elo.dashboard_views import (
     sort_ranking_rows,
     timestamp_to_datetime_utc,
     timestamp_to_iso_date,
+    tournament_weighting_report,
+    weighting_mode_notice,
     window_label,
     window_plans,
 )
@@ -66,6 +72,7 @@ from tennis_elo.models import (
     RatingConfig,
     RatingResult,
 )
+from tennis_elo.weighting import TOURNAMENT_COEFFICIENTS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = REPO_ROOT / "src" / "tennis_elo" / "dashboard.py"
@@ -219,7 +226,9 @@ HISTORY = (
 )
 
 
-def make_calculation_result(seasons: tuple[int, ...] = (2025, 2026)) -> CalculationResult:
+def make_calculation_result(
+    seasons: tuple[int, ...] = (2025, 2026), *, config: RatingConfig | None = None
+) -> CalculationResult:
     """Build a real shared-model fixture with consistent load accounting."""
     load = LoadResult(
         matches=MATCHES,
@@ -231,7 +240,10 @@ def make_calculation_result(seasons: tuple[int, ...] = (2025, 2026)) -> Calculat
         duplicate_rows=1,
     )
     ratings = RatingResult(players=PLAYERS, history=HISTORY, matches_processed=3)
-    return CalculationResult(seasons=seasons, config=RatingConfig(), load=load, ratings=ratings)
+    return CalculationResult(
+        seasons=seasons, config=config if config is not None else RatingConfig(), load=load,
+        ratings=ratings,
+    )
 
 
 def make_ranking_rows() -> list[dict]:
@@ -302,6 +314,88 @@ def same_day_history_rows() -> list[dict]:
         {**base, "match_id": "m-late", "timestamp": TS_1 + 43200, "rating_after": 1516.0},
         {**base, "match_id": "m-early", "timestamp": TS_1, "rating_after": 1508.0},
     ]
+
+
+def weighted_history_rows() -> list[dict]:
+    """Export-shaped history rows that carry recorded weighting metadata."""
+    base = {
+        "season_year": 2026,
+        "player_id": "p1",
+        "player_name": "Alpha A.",
+        "opponent_id": "p2",
+        "opponent_name": "Beta B.",
+        "won": True,
+        "rating_before": 1500.0,
+        "opponent_rating_before": 1500.0,
+        "expected_score": 0.5,
+        "surface": "hard",
+        "date": "2026-01-01",
+    }
+    return [
+        {
+            **base,
+            "match_id": "g1",
+            "timestamp": TS_1,
+            "rating_after": 1532.0,
+            "tournament": "Wimbledon",
+            "tournament_level": "grand_slam",
+            "tournament_weight": 2.0,
+            "effective_k_factor": 64.0,
+        },
+        {
+            **base,
+            "match_id": "a1",
+            "timestamp": TS_2,
+            "rating_after": 1540.0,
+            "tournament": "Doha",
+            "tournament_level": "atp_250",
+            "tournament_weight": 1.0,
+            "effective_k_factor": 32.0,
+        },
+    ]
+
+
+_DEFAULT_SUMMARY = object()
+
+
+def make_weighting_section(
+    *,
+    enabled: bool = True,
+    unknown: tuple[dict, ...] = (),
+    matches_by_level=None,
+) -> dict:
+    """The sibling ``tournament_weighting`` summary section shape."""
+    return {
+        "enabled": enabled,
+        "coefficients": dict(TOURNAMENT_COEFFICIENTS),
+        "matches_by_level": {"atp_250": 3} if matches_by_level is None else matches_by_level,
+        "unknown_matches": sum(int(record["matches"]) for record in unknown),
+        "unknown_tournaments": [dict(record) for record in unknown],
+    }
+
+
+def make_summary(result=None, *, weighting_section=_DEFAULT_SUMMARY) -> dict:
+    """A summary dict in the shape ``tennis_elo.export.summary_dict`` promises."""
+    if result is None:
+        result = make_calculation_result()
+    config = result.config
+    summary = {
+        "seasons": list(result.seasons),
+        "configuration": {
+            "initial_rating": config.initial_rating,
+            "k_factor": config.k_factor,
+            "include_retirements": config.include_retirements,
+            "use_tournament_weights": config.use_tournament_weights,
+        },
+        "fresh_start": True,
+    }
+    if weighting_section is _DEFAULT_SUMMARY:
+        summary["tournament_weighting"] = make_weighting_section(
+            enabled=config.use_tournament_weights
+        )
+    elif weighting_section is not None:
+        summary["tournament_weighting"] = weighting_section
+    return summary
 
 
 # --------------------------------------------------------------------------- #
@@ -499,11 +593,144 @@ def test_run_metadata_rows_report_full_eligibility_metadata():
     assert metadata["Players rated"] == 3
     assert metadata["Matches rated"] == 3
     assert metadata["Retirements included"] == "yes"
-    assert metadata["K-factor"] == "32"
+    assert metadata["Base K-factor"] == "32"
+    assert "enabled" in metadata["Tournament weighting"]
+    assert "effective K" in metadata["Tournament weighting"]
     assert metadata["Available seasons"] == "2024, 2025, 2026"
     assert metadata["Input files"].endswith("2026-atp-season.csv")
     assert metadata["Excluded rows"] == 2
     assert metadata["Accounting check"] == "consistent"
+
+
+def test_run_metadata_rows_report_the_weighting_mode_truthfully():
+    weighted = {
+        row["field"]: row["value"] for row in run_metadata_rows(make_calculation_result())
+    }
+    assert weighted["Base K-factor"] == "32"
+    assert weighted["Tournament weighting"].startswith("enabled")
+    assert "effective K" in weighted["Tournament weighting"]
+
+    unweighted_result = make_calculation_result(
+        config=RatingConfig(use_tournament_weights=False)
+    )
+    unweighted = {
+        row["field"]: row["value"] for row in run_metadata_rows(unweighted_result)
+    }
+    assert unweighted["Tournament weighting"].startswith("disabled")
+    assert "classic" in unweighted["Tournament weighting"].lower()
+
+
+def test_coefficient_rows_show_the_fixed_canonical_policy():
+    rows = coefficient_rows()
+    assert list(rows[0]) == list(COEFFICIENT_COLUMNS)
+    assert [row["coefficient"] for row in rows] == [
+        0.75,
+        1.0,
+        1.25,
+        1.5,
+        1.75,
+        2.0,
+        1.0,
+        1.0,
+    ]
+    labels = " ".join(row["level"] for row in rows).lower()
+    for token in ("challenger", "atp 250", "atp 500", "masters 1000", "atp finals"):
+        assert token in labels
+    assert "grand slam" in labels
+    assert "other" in labels and "unknown" in labels and "fallback" in labels
+    assert {row["coefficient"] for row in rows} == set(TOURNAMENT_COEFFICIENTS.values())
+
+
+def test_weighting_mode_notice_explains_base_and_effective_k():
+    weighted = weighting_mode_notice(True)
+    lowered = weighted.lower()
+    assert "base k" in lowered and "effective k" in lowered
+    assert "coefficient" in lowered
+    assert "base k x" in lowered or "base k *" in lowered
+
+    unweighted = weighting_mode_notice(False).lower()
+    assert "classic elo" in unweighted
+    assert "effective k" in unweighted
+    assert "base k" in unweighted
+
+
+def test_tournament_weighting_report_reads_the_summary_section_and_warns_on_unknowns():
+    result = make_calculation_result()
+    summary = make_summary(
+        result,
+        weighting_section=make_weighting_section(
+            unknown=(
+                {"season_year": 2025, "tournament": "Mystery Cup", "matches": 1},
+                {"season_year": 2024, "tournament": "Atlantis Open", "matches": 2},
+            ),
+            matches_by_level={"grand_slam": 1, "atp_250": 2},
+        ),
+    )
+    report = tournament_weighting_report(result, summary)
+    assert report.reported is True
+    assert report.enabled is True
+    assert report.absent_notice == ""
+    assert [row["level"] for row in report.matches_by_level] == ["ATP 250", "Grand Slam"]
+    assert [row["matches"] for row in report.matches_by_level] == [2, 1]
+    assert list(report.matches_by_level[0]) == list(CLASSIFICATION_COLUMNS)
+    assert report.unknown_matches == 3
+    # Deterministic display order even if the summary is not pre-sorted.
+    assert [row["tournament"] for row in report.unknown_tournaments] == [
+        "Atlantis Open",
+        "Mystery Cup",
+    ]
+    assert [row["season_year"] for row in report.unknown_tournaments] == [2024, 2025]
+    assert list(report.unknown_tournaments[0]) == list(UNKNOWN_TOURNAMENT_COLUMNS)
+    notice = report.unknown_notice.lower()
+    assert "3" in notice and "fallback" in notice and "unknown" in notice
+
+
+def test_tournament_weighting_report_accepts_record_style_level_counts():
+    section = make_weighting_section(matches_by_level=[{"level": "atp_500", "matches": 4}])
+    result = make_calculation_result()
+    report = tournament_weighting_report(result, {"tournament_weighting": section})
+    assert report.reported is True
+    assert report.matches_by_level == ({"level": "ATP 500", "matches": 4},)
+
+
+def test_tournament_weighting_report_unweighted_mode_has_no_unknown_warning():
+    result = make_calculation_result(config=RatingConfig(use_tournament_weights=False))
+    report = tournament_weighting_report(result, make_summary(result))
+    assert report.enabled is False
+    assert report.reported is True
+    assert report.unknown_matches == 0
+    assert report.unknown_notice == ""
+
+
+def test_tournament_weighting_report_without_the_section_never_invents_data():
+    result = make_calculation_result()
+    summaries = (
+        None,
+        {},
+        {"configuration": {}},
+        {"configuration": {"use_tournament_weights": True}},
+        {"tournament_weighting": None},
+        {"tournament_weighting": "not-a-mapping"},
+    )
+    for summary in summaries:
+        report = tournament_weighting_report(result, summary)
+        assert report.reported is False, summary
+        # The frozen run config is authoritative for the mode, even without a summary.
+        assert report.enabled is True, summary
+        assert report.matches_by_level == (), summary
+        assert report.unknown_matches is None, summary
+        assert report.unknown_tournaments == (), summary
+        assert report.unknown_notice == "", summary
+        assert "did not include" in report.absent_notice.lower()
+
+
+def test_history_columns_contract_includes_the_weighting_fields():
+    assert HISTORY_COLUMNS[:4] == ("date", "match_id", "season_year", "tournament")
+    assert HISTORY_COLUMNS[4:7] == (
+        "tournament_level",
+        "tournament_weight",
+        "effective_k_factor",
+    )
 
 
 def test_exclusion_rows_sorted_by_count():
@@ -537,6 +764,29 @@ def test_timestamp_to_datetime_utc_handles_invalid_values():
     assert timestamp_to_datetime_utc("not-a-timestamp") is None
     assert timestamp_to_datetime_utc(None) is None
     assert timestamp_to_datetime_utc(True) is None
+
+
+def test_player_history_rows_show_recorded_weighting_values():
+    rows = player_history_rows(make_history_rows(), "p1")
+    # The shared model defaults are real recorded values, not invented ones.
+    assert rows[0]["tournament_level"] == "unknown"
+    assert rows[0]["tournament_weight"] == 1.0
+    assert rows[0]["effective_k_factor"] == 32.0
+
+    recorded = player_history_rows(weighted_history_rows(), "p1")
+    assert [row["match_id"] for row in recorded] == ["g1", "a1"]
+    assert recorded[0]["tournament_level"] == "grand_slam"
+    assert recorded[0]["tournament_weight"] == 2.0
+    assert recorded[0]["effective_k_factor"] == 64.0
+    assert recorded[1]["tournament_level"] == "atp_250"
+
+
+def test_player_history_rows_do_not_invent_missing_weighting_values():
+    legacy = [{"player_id": "p1", "match_id": "old", "timestamp": TS_1, "rating_after": 1510.0}]
+    row = player_history_rows(legacy, "p1")[0]
+    assert row["tournament_level"] == ""
+    assert row["tournament_weight"] == ""
+    assert row["effective_k_factor"] == ""
 
 
 def test_player_history_rows_filters_sorts_and_labels_opponent():
@@ -583,6 +833,19 @@ def test_control_error_and_build_rating_config():
     assert "greater than zero" in control_error(initial_rating=1500.0, k_factor=0.0)
     config = build_rating_config(initial_rating=1400.0, k_factor=16.0, include_retirements=False)
     assert config == RatingConfig(initial_rating=1400.0, k_factor=16.0, include_retirements=False)
+    assert config.use_tournament_weights is True
+    unweighted = build_rating_config(
+        initial_rating=1400.0,
+        k_factor=16.0,
+        include_retirements=False,
+        use_tournament_weights=False,
+    )
+    assert unweighted == RatingConfig(
+        initial_rating=1400.0,
+        k_factor=16.0,
+        include_retirements=False,
+        use_tournament_weights=False,
+    )
     with pytest.raises(ValueError):
         build_rating_config(initial_rating=1500.0, k_factor=-1.0, include_retirements=True)
 
@@ -803,6 +1066,8 @@ def _install_stub_modules(
     result=None,
     calculate_error=None,
     ranking_rows_hook=None,
+    history_rows_fixture=None,
+    summary=_DEFAULT_SUMMARY,
     calls=None,
 ):
     """Inject stub P0 modules; the app imports them lazily at runtime only."""
@@ -825,7 +1090,9 @@ def _install_stub_modules(
         note("calculate", tuple(seasons_), config, include_history)
         if calculate_error is not None:
             raise calculate_error
-        return result if result is not None else make_calculation_result(tuple(seasons_))
+        if result is not None:
+            return result
+        return make_calculation_result(tuple(seasons_), config=config)
 
     def fake_ranking_rows(calculated, min_matches=0):
         note("ranking_rows", tuple(getattr(calculated, "seasons", ())), min_matches)
@@ -835,6 +1102,8 @@ def _install_stub_modules(
 
     def fake_history_rows(calculated):
         note("history_rows")
+        if history_rows_fixture is not None:
+            return history_rows_fixture
         return make_history_rows()
 
     def fake_rankings_csv(calculated, min_matches=0):
@@ -845,12 +1114,19 @@ def _install_stub_modules(
         note("history_csv")
         return "date,match_id\n2026-01-01,m1\n"
 
+    def fake_summary_dict(calculated):
+        note("summary_dict")
+        if summary is _DEFAULT_SUMMARY:
+            return make_summary(calculated)
+        return summary
+
     api_stub.available_seasons = fake_available_seasons
     api_stub.calculate = fake_calculate
     export_stub.ranking_rows = fake_ranking_rows
     export_stub.history_rows = fake_history_rows
     export_stub.rankings_csv = fake_rankings_csv
     export_stub.history_csv = fake_history_csv
+    export_stub.summary_dict = fake_summary_dict
     monkeypatch.setitem(sys.modules, "tennis_elo.api", api_stub)
     monkeypatch.setitem(sys.modules, "tennis_elo.export", export_stub)
     return api_stub, export_stub
@@ -935,6 +1211,8 @@ def test_app_calculates_and_renders_leaderboard_player_detail_and_downloads(monk
     assert metadata["Players rated"] == "3"
     assert metadata["Matches rated"] == "3"
     assert metadata["Seasons"] == "2026"
+    assert metadata["Base K-factor"] == "32"
+    assert "enabled" in metadata["Tournament weighting"]
     assert metadata["Accounting check"] == "consistent"
     assert _frame(app, ("exclusion", "count"))["exclusion"].tolist()[:1] == ["exhibition"]
 
@@ -947,6 +1225,160 @@ def test_app_calculates_and_renders_leaderboard_player_detail_and_downloads(monk
     assert "(p1)" in app.selectbox(key="player_id").format_func("p1")
     assert _frame(app, HISTORY_COLUMNS) is not None
     assert len(app.get("vega_lite_chart")) >= 1
+    # The weighting policy is fixed and always shown; the classification counts come
+    # from the run summary (the sibling export section).
+    assert _frame(app, COEFFICIENT_COLUMNS) is not None
+    assert _frame(app, CLASSIFICATION_COLUMNS) is not None
+
+
+def test_app_weighting_checkbox_defaults_on_and_threads_into_the_config(monkeypatch):
+    calls = []
+    app = _run_app(monkeypatch, calls=calls)
+    checkbox = app.checkbox(key="use_tournament_weights")
+    assert checkbox.label == "Use tournament weights"
+    assert checkbox.value is True
+    help_text = checkbox.help.lower()
+    assert "base k" in help_text and "effective k" in help_text
+    assert "coefficient" in help_text and "classic elo" in help_text
+
+    app.button(key="calculate").click().run()
+    weighted_config = next(call[2] for call in calls if call[0] == "calculate")
+    assert weighted_config == RatingConfig(use_tournament_weights=True)
+    metadata = {
+        row["field"]: row["value"] for row in _frame(app, ("field", "value")).to_dict("records")
+    }
+    assert "enabled" in metadata["Tournament weighting"]
+    summary_notices = _texts(app.caption) + _texts(app.info)
+    assert "enabled" in summary_notices.lower()
+    assert "coefficient" in summary_notices.lower()
+
+    calls.clear()
+    app.checkbox(key="use_tournament_weights").set_value(False).run()
+    app.button(key="calculate").click().run()
+    unweighted_config = next(call[2] for call in calls if call[0] == "calculate")
+    assert unweighted_config == RatingConfig(use_tournament_weights=False)
+    metadata = {
+        row["field"]: row["value"] for row in _frame(app, ("field", "value")).to_dict("records")
+    }
+    assert "disabled" in metadata["Tournament weighting"]
+    assert "classic elo" in (_texts(app.caption) + _texts(app.info)).lower()
+    assert not app.exception
+
+
+def test_app_weighting_mode_change_stales_the_run_and_recalculation_refreshes(monkeypatch):
+    app = _run_app(monkeypatch)
+    app.button(key="calculate").click().run()
+    assert not app.warning
+
+    app.checkbox(key="use_tournament_weights").set_value(False).run()
+    assert not app.exception
+    assert "changed" in _texts(app.warning).lower()
+
+    app.button(key="calculate").click().run()
+    assert not app.warning
+    assert not app.exception
+
+
+def test_app_weighting_mode_change_stales_comparisons_until_recomputed(monkeypatch):
+    calls = []
+    app = _run_app(monkeypatch, calls=calls, ranking_rows_hook=_window_ranking_rows)
+    app.button(key="calculate").click().run()
+    app.button(key="compare_windows").click().run()
+    weighted_calls = [call for call in calls if call[0] == "calculate"]
+    assert [call[1] for call in weighted_calls] == [
+        (2026,),
+        (2026,),
+        (2025, 2026),
+        (2024, 2025, 2026),
+    ]
+    assert all(call[2] == RatingConfig(use_tournament_weights=True) for call in weighted_calls)
+    assert all(call[3] is False for call in weighted_calls[1:])
+
+    calls.clear()
+    app.checkbox(key="use_tournament_weights").set_value(False).run()
+    # The mode is part of the comparison signature: the old window results are not reused.
+    assert "compare windows" in _texts(app.info).lower()
+    assert not any(call[0] == "calculate" for call in calls)
+
+    app.button(key="compare_windows").click().run()
+    recomputed = [call for call in calls if call[0] == "calculate"]
+    assert [call[1] for call in recomputed] == [(2026,), (2025, 2026), (2024, 2025, 2026)]
+    assert all(call[2] == RatingConfig(use_tournament_weights=False) for call in recomputed)
+    assert all(call[3] is False for call in recomputed)
+
+    # Switching player still reuses the cached per-window rows: nothing is recomputed.
+    after_compare = len(recomputed)
+    app.selectbox(key="player_id").select("p3").run()
+    assert len([call for call in calls if call[0] == "calculate"]) == after_compare
+    assert not app.exception
+
+
+def test_app_shows_the_weighting_policy_and_visible_unknown_fallback_warning(monkeypatch):
+    section = make_weighting_section(
+        unknown=(
+            {"season_year": 2026, "tournament": "Mystery Cup", "matches": 2},
+            {"season_year": 2025, "tournament": "Atlantis Open", "matches": 1},
+        ),
+        matches_by_level={"atp_250": 2, "grand_slam": 1},
+    )
+    summary = make_summary(make_calculation_result(), weighting_section=section)
+    app = _run_app(monkeypatch, summary=summary)
+    app.button(key="calculate").click().run()
+    assert not app.exception
+
+    warning = _texts(app.warning).lower()
+    assert "3" in warning and "fallback" in warning and "unknown" in warning
+
+    coefficients = _frame(app, COEFFICIENT_COLUMNS)
+    assert "Grand Slam" in coefficients["level"].tolist()
+    classification = _frame(app, CLASSIFICATION_COLUMNS).to_dict("records")
+    assert classification == [
+        {"level": "ATP 250", "matches": 2},
+        {"level": "Grand Slam", "matches": 1},
+    ]
+    unclassified = _frame(app, UNKNOWN_TOURNAMENT_COLUMNS).to_dict("records")
+    assert [row["tournament"] for row in unclassified] == ["Atlantis Open", "Mystery Cup"]
+    assert [row["season_year"] for row in unclassified] == [2025, 2026]
+
+
+def test_app_handles_a_summary_without_weighting_metadata(monkeypatch):
+    legacy = {
+        "seasons": [2026],
+        "configuration": {"use_tournament_weights": True},
+        "fresh_start": True,
+    }
+    for summary in (None, legacy):
+        app = _run_app(monkeypatch, summary=summary)
+        app.button(key="calculate").click().run()
+        assert not app.exception, summary
+        assert not app.warning, summary  # nothing to warn about, and no invented unknowns
+        assert "did not include" in _texts(app.info).lower(), summary
+        # The fixed policy table is always shown; run classification is not invented.
+        assert _frame(app, COEFFICIENT_COLUMNS) is not None
+        with pytest.raises(AssertionError):
+            _frame(app, CLASSIFICATION_COLUMNS)
+        metadata = {
+            row["field"]: row["value"]
+            for row in _frame(app, ("field", "value")).to_dict("records")
+        }
+        assert "enabled" in metadata["Tournament weighting"]
+
+
+def test_app_player_history_table_shows_recorded_weighting_columns(monkeypatch):
+    app = _run_app(monkeypatch, history_rows_fixture=weighted_history_rows())
+    app.button(key="calculate").click().run()
+    assert not app.exception
+    history = _frame(app, HISTORY_COLUMNS)
+    assert list(history.columns)[4:7] == [
+        "tournament_level",
+        "tournament_weight",
+        "effective_k_factor",
+    ]
+    assert list(history["match_id"]) == ["g1", "a1"]
+    assert list(history["tournament_level"]) == ["grand_slam", "atp_250"]
+    assert list(history["tournament_weight"]) == [2.0, 1.0]
+    assert list(history["effective_k_factor"]) == [64.0, 32.0]
+
 
 
 def test_app_preset_marks_unavailable_window_without_shortening(monkeypatch):

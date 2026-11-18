@@ -41,12 +41,26 @@ of a traceback.
   that season, and an explicit multi-select that overrides the preset. Selection
   rules (one to three distinct consecutive seasons) are validated before
   `tennis_elo.api.calculate` is called.
-- **Controls**: initial rating, K-factor, retirement policy and a minimum-match
-  field. The minimum-match value is a presentation filter only: it changes the
+- **Controls**: initial rating, K-factor, retirement policy, a **Use tournament
+  weights** checkbox and a minimum-match field. The K-factor field is the BASE K:
+  with tournament weights on, each match's effective K is the base K times the
+  tournament coefficient. Unchecking `Use tournament weights` (or using the API/
+  CLI equivalent) gives classic Elo, where the effective K is always the base K.
+  The minimum-match value is a presentation filter only: it changes the
   leaderboard and the rankings CSV, never the Elo replay.
 - **Run metadata**: seasons, configuration, input files, available seasons,
   physical rows read, selected rows, matches rated, players rated, ignored
-  duplicates, excluded rows and the load accounting identity.
+  duplicates, excluded rows and the load accounting identity. The configuration
+  rows name the base K-factor and state whether tournament weighting is enabled.
+- **Tournament weighting**: the model notice states whether the run is weighted
+  and repeats that effective K = base K x coefficient; the coefficient policy
+  table and the classification policy are always shown. Match counts per
+  tournament level and the unclassified-tournament detail come from the run
+  summary's `tournament_weighting` section. When that section is missing (an
+  older export module), the section says so explicitly instead of showing
+  invented numbers. Unclassified matches use the explicit `unknown` fallback
+  coefficient 1.00, are rated (never excluded) and raise a visible warning with
+  the affected tournaments listed.
 - **Leaderboard**: searchable by name or player ID, sortable by any column, Elo
   rounded to one decimal for display only.
 - **Player detail**: a selector whose state is the raw player ID and whose label
@@ -54,12 +68,43 @@ of a traceback.
   its selection when the latest name changes between windows. It shows key
   statistics, an Elo chart with one temporal point per match (UTC timestamps, so
   several matches on one date stay distinct and ordered) and the match history
-  (newest last).
+  (newest last), including the recorded tournament level, applied coefficient and
+  effective K-factor for every match. Legacy history rows that do not carry those
+  fields render as empty cells; the UI never invents a coefficient or K.
 - **Downloads**: rankings and match-history CSV come from `tennis_elo.export`
   (`rankings_csv` / `history_csv`). The full match-history export is behind an
   opt-in toggle and is built once per run.
 
 `api.calculate` is always called with `include_history=True`.
+
+## Tournament weighting
+
+The checkbox is on by default, matching the shared `RatingConfig` default. The
+operator-selected coefficient scale is fixed:
+
+| Canonical level | Coefficient |
+|---|---:|
+| `challenger` | 0.75 |
+| `atp_250` | 1.00 |
+| `atp_500` | 1.25 |
+| `masters_1000` | 1.50 |
+| `atp_finals` | 1.75 |
+| `grand_slam` | 2.00 |
+| `other` (team/nonstandard) | 1.00 |
+| `unknown` (fallback) | 1.00 |
+
+`effective K = base K x coefficient`, applied identically to both players with
+their pre-match ratings: ratings, expected scores and zero-sum updates are never
+scaled. Qualifying inherits its parent tournament's category (Grand Slam
+qualifying therefore also uses 2.00); team/nonstandard events use `other` = 1.00;
+and a label that cannot be classified uses the explicit `unknown` fallback 1.00
+and is reported instead of being silently treated as ATP 250. The classification
+metadata is read from `tennis_elo.export.summary_dict`'s `tournament_weighting`
+section (`enabled`, `coefficients`, `matches_by_level`, `unknown_matches`,
+`unknown_tournaments`); the dashboard does not classify tournaments itself.
+
+Unchecking the box is classic Elo: every match uses the base K as its effective
+K, while the classified level and weight 1.00 stay recorded in history.
 
 ## Fresh-start and window semantics
 
@@ -68,10 +113,16 @@ rating and replays only the selected seasons; ratings are not continuous annual
 changes. The same caveat is visible in the UI.
 
 The window comparison recomputes the one-, two- and three-season windows that end
-at the chosen season, each with its own calculation from the same initial rating.
-If a window needs a season that is not in the data directory, the row is marked
-`unavailable`, lists the missing seasons, and is never replaced by a shorter
-calculation.
+at the chosen season, each with its own calculation from the same initial rating
+and all with the same current configuration. If a window needs a season that is
+not in the data directory, the row is marked `unavailable`, lists the missing
+seasons, and is never replaced by a shorter calculation.
+
+The tournament-weighting flag is part of the frozen configuration, so it is part
+of the calculation signature: changing it marks the main calculation as stale and
+requires **Calculate ratings** again, and it invalidates a stored window
+comparison until **Compare windows** is pressed again. Switching the selected
+player never recomputes any window; the cached per-window rows are re-rendered.
 
 The primary comparison table is per player: for the selected player ID it shows
 the rating, global rank, matches, wins and losses in each window; a window where
@@ -104,11 +155,14 @@ uv run --locked --extra dashboard ruff check src/tennis_elo/dashboard.py \
 pandas dependencies from the environment, which makes the `AppTest` cases skip.
 
 `tests/test_dashboard.py` covers the pure helpers (search, sorting, player-ID
-disambiguation, window availability, text safety, errors), the launcher
-(argument construction, missing extra, invalid port, no import-time Streamlit),
-and Streamlit `AppTest` runs. The `AppTest` UI tests inject stub
-`tennis_elo.api` / `tennis_elo.export` modules through the import system, so they
-run in an isolated dashboard worktree. The test
+disambiguation, window availability, text safety, errors), the tournament
+weighting presentation (coefficient policy, base/effective K wording,
+classification metadata, the unknown fallback warning, graceful handling of a
+summary without the `tournament_weighting` section, and the new history
+columns), the launcher (argument construction, missing extra, invalid port, no
+import-time Streamlit), and Streamlit `AppTest` runs. The `AppTest` UI tests
+inject stub `tennis_elo.api` / `tennis_elo.export` modules through the import
+system, so they run in an isolated dashboard worktree. The test
 `test_app_integration_with_real_p0_modules_and_data` skips until the P0 modules
 and the season CSVs are present, and then runs a real 2026-season calculation
 through the UI; the integrated parent checkout runs it for real.
