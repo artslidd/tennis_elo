@@ -38,6 +38,7 @@ from tennis_elo.dashboard_views import (
     coefficient_rows,
     comparison_entry,
     comparison_rows,
+    comparison_unknown_notice,
     control_error,
     display_ranking_rows,
     elo_chart_rows,
@@ -923,6 +924,41 @@ def test_comparison_entry_reads_models_and_disambiguates_top_player():
     assert entry["seasons"] == "2025\u20132026"
     assert entry["excluded_matches"] == 2
     assert entry["duplicate_rows"] == 1
+    # No summary: unknown count is reported as unavailable, never fabricated as zero.
+    assert entry["unknown_matches"] == ""
+
+
+def test_comparison_entry_reads_unknown_matches_from_summary():
+    result = make_calculation_result()
+    summary = {"tournament_weighting": {"unknown_matches": 2}}
+    assert comparison_entry(result, summary)["unknown_matches"] == 2
+    fallback = {"tournament_weighting": {"unknown_tournaments": [
+        {"season_year": 2025, "tournament": "Mystery Cup ATP", "matches": 3}
+    ]}}
+    assert comparison_entry(result, fallback)["unknown_matches"] == 3
+
+
+def test_comparison_unknown_notice_names_only_affected_windows():
+    plans = window_plans((2024, 2025, 2026), end_year=2026)
+    clean = comparison_entry(make_calculation_result(), {"tournament_weighting": {"unknown_matches": 0}})
+    unknown = dict(clean, unknown_matches=1)
+    assert comparison_unknown_notice(plans, {}) == ""
+    text = comparison_unknown_notice(plans, {1: clean, 2: unknown, 3: unknown})
+    assert text and "unknown" in text.lower() and "1.00" in text
+    assert "2-season" in text and "3-season" in text
+    assert "1-season" not in text
+    assert all(str(year) in text for year in (2024, 2025, 2026))
+    only_first = comparison_unknown_notice(plans, {1: unknown, 2: clean, 3: clean})
+    assert "1-season" in only_first
+    assert "2-season" not in only_first and "3-season" not in only_first
+
+
+def test_comparison_rows_reports_unknown_matches_column():
+    plans = window_plans((2025, 2026), end_year=2026)
+    entry = comparison_entry(make_calculation_result(), {"tournament_weighting": {"unknown_matches": 1}})
+    rows = comparison_rows(plans, {1: entry})
+    assert rows[0]["unknown_matches"] == 1
+    assert rows[1]["unknown_matches"] == ""  # unavailable window, no fabricated count
 
 
 def test_fresh_start_notice_states_carry_within_run_and_independent_resets():

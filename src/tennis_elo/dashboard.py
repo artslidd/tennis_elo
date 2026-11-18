@@ -45,6 +45,7 @@ from tennis_elo.dashboard_views import (
     coefficient_rows,
     comparison_entry,
     comparison_rows,
+    comparison_unknown_notice,
     control_error,
     display_ranking_rows,
     elo_chart_rows,
@@ -714,7 +715,7 @@ def _compute_comparison(
             errors[plan.size] = message
             entries[plan.size] = message
             continue
-        entries[plan.size] = comparison_entry(result)
+        entries[plan.size] = comparison_entry(result, _summary_dict(result))
         players[plan.size] = {
             player_id: dict(row)
             for row in rows
@@ -751,6 +752,12 @@ def _render_comparison(state: Mapping[str, Any]) -> None:
             "same initial rating. Missing earlier seasons are reported as unavailable."
         )
         return
+
+    # Name the compared windows that replayed matches against tournaments outside
+    # the catalog; clean windows never produce a warning (review finding W1).
+    notice = comparison_unknown_notice(plans, stored["entries"])
+    if notice:
+        st.warning(notice)
 
     players_by_window: Mapping[int, Mapping[str, Mapping[str, Any]]] = stored.get("players") or {}
     label_map: Mapping[str, str] = st.session_state.get("_player_labels") or {}

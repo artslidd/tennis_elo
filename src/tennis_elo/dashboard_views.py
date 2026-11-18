@@ -50,6 +50,7 @@ __all__ = [
     "coefficient_rows",
     "comparison_entry",
     "comparison_rows",
+    "comparison_unknown_notice",
     "control_error",
     "display_ranking_rows",
     "elo_chart_rows",
@@ -139,6 +140,7 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "status",
     "players_rated",
     "matches_processed",
+    "unknown_matches",
     "top_player",
     "top_rating",
     "note",
@@ -782,19 +784,66 @@ def tournament_weighting_report(
     )
 
 
-def comparison_entry(result: CalculationResult) -> dict[str, Any]:
-    """Compact summary of one calculated window for the comparison table."""
+def comparison_entry(
+    result: CalculationResult, summary: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Compact summary of one calculated window for the comparison table.
+
+    ``summary`` is the export lane's run summary (see :func:`_summary_dict` in
+    the dashboard); its ``tournament_weighting`` section supplies the per-window
+    unknown-fallback match count. Without it the count is reported as
+    unavailable rather than fabricated as zero.
+    """
     players = result.ratings.players
     top = players[0] if players else None
+    weighting = summary.get("tournament_weighting") if isinstance(summary, Mapping) else None
+    if not isinstance(weighting, Mapping):
+        # No summary metadata: the count is unavailable, never fabricated as zero.
+        unknown_matches: int | None = None
+    else:
+        unknown_matches = _as_int_or_none(weighting.get("unknown_matches"))
+    if unknown_matches is None and isinstance(weighting, Mapping):
+        unknown_matches = sum(
+            row["matches"]
+            for row in _unknown_tournament_rows(weighting.get("unknown_tournaments"))
+        )
     return {
         "seasons": window_label(result.seasons),
         "players_rated": len(players),
         "matches_processed": _as_int(result.ratings.matches_processed),
+        "unknown_matches": unknown_matches if unknown_matches is not None else "",
         "excluded_matches": sum(_as_int(count) for count in result.load.excluded_counts.values()),
         "duplicate_rows": _as_int(result.load.duplicate_rows),
         "top_player": player_option_label(top.name, top.player_id) if top else "",
         "top_rating": round(top.rating, 1) if top else None,
     }
+
+
+def comparison_unknown_notice(
+    plans: Iterable[SeasonWindow],
+    entries: Mapping[int, Mapping[str, Any] | str | None],
+) -> str:
+    """Warning text naming compared windows that used the unknown fallback.
+
+    Returns an empty string when no compared window contains unknown
+    tournaments, so clean comparisons render no warning at all.
+    """
+    affected: list[str] = []
+    for plan in plans:
+        entry = entries.get(plan.size)
+        if not plan.available or not isinstance(entry, Mapping):
+            continue
+        count = _as_int_or_none(entry.get("unknown_matches"))
+        if count:
+            affected.append(f"{plan.label} ({window_label(plan.years)}) with {count} match(es)")
+    if not affected:
+        return ""
+    return (
+        "Unknown tournaments in compared windows: the "
+        + ", the ".join(affected)
+        + " used the explicit `unknown` fallback coefficient 1.00 because no catalogued "
+        "level matched those events."
+    )
 
 
 def comparison_rows(
@@ -810,6 +859,7 @@ def comparison_rows(
             "status": "available" if plan.available else "unavailable",
             "players_rated": "",
             "matches_processed": "",
+            "unknown_matches": "",
             "top_player": "",
             "top_rating": "",
             "note": "" if plan.available else plan.reason,
@@ -821,6 +871,7 @@ def comparison_rows(
         elif plan.available and isinstance(entry, Mapping):
             row["players_rated"] = entry.get("players_rated", "")
             row["matches_processed"] = entry.get("matches_processed", "")
+            row["unknown_matches"] = entry.get("unknown_matches", "")
             row["top_player"] = safe_label(entry.get("top_player"))
             row["top_rating"] = entry.get("top_rating", "")
             row["excluded_matches"] = entry.get("excluded_matches", "")
