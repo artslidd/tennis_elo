@@ -3,18 +3,28 @@
 from dataclasses import dataclass
 from math import isfinite
 
+from .weighting import TOURNAMENT_COEFFICIENTS
+
 
 @dataclass(frozen=True, slots=True)
 class RatingConfig:
     initial_rating: float = 1500.0
     k_factor: float = 32.0
     include_retirements: bool = True
+    use_tournament_weights: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.use_tournament_weights, bool):
+            # Keep the public configuration-validation contract: ValueError.
+            raise ValueError("use_tournament_weights must be a bool")  # noqa: TRY004
         if not isfinite(self.initial_rating):
             raise ValueError("initial_rating must be finite")
         if not isfinite(self.k_factor) or self.k_factor <= 0:
             raise ValueError("k_factor must be finite and greater than zero")
+        if self.use_tournament_weights and not isfinite(
+            self.k_factor * max(TOURNAMENT_COEFFICIENTS.values())
+        ):
+            raise ValueError("k_factor produces a non-finite effective K with tournament weighting")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +40,7 @@ class Match:
     tournament: str = ""
     round: str = ""
     surface: str = ""
+    tournament_level: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +82,9 @@ class HistoryEntry:
     rating_after: float
     tournament: str = ""
     surface: str = ""
+    tournament_level: str = "unknown"
+    tournament_weight: float = 1.0
+    effective_k_factor: float = 32.0
 
 
 @dataclass(frozen=True, slots=True)

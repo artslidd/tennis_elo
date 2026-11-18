@@ -22,8 +22,8 @@
 - [x] Isolated base install and bounded localhost server health/cleanup checks passed.
 - [x] P0 review follow-ups integrated: structural CSV validation, history-export guard, and reporting metadata; 303 integrated tests passed.
 - [x] Opus 5.5 API/CLI/export spec and quality approval at `4e16e0d`; all findings resolved.
-- [ ] Opus 5.5 core/data/math re-approval after structural CSV validation fix.
-- [ ] P1 revisions: stable-ID selection, carry/reset wording, selected-player window comparison, directory presets, and temporal chart.
+- [x] Opus 5.5 core/data/math spec and quality approval at `4e16e0d`; P0 has no blocking findings. Parent rerun: 251 P0 tests passed, Ruff clean, wheel/source builds passed.
+- [x] P1 revisions integrated at `a1b9823`: stable-ID selection, carry/reset wording, selected-player window comparison, directory presets, and temporal chart. Parent verification: 315 tests passed, Ruff clean, real-API synthetic UI scenarios passed.
 - [ ] Opus 5.5 dashboard spec and quality re-approval.
 - [ ] Final full-suite/build/smoke verification and delivery report.
 
