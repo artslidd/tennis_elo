@@ -20,8 +20,11 @@
 - [x] Initial integrated verification: 279 tests passed, Ruff clean, source/wheel builds passed.
 - [x] Real-data CLI and interactive dashboard checks passed for all three window sizes.
 - [x] Isolated base install and bounded localhost server health/cleanup checks passed.
-- [ ] Review follow-ups integrated and reverified (history-export guard landed; structural CSV validation and reporting metadata under review).
-- [ ] Independent Opus 5.5 acceptance: core, API/CLI, dashboard (reviews in progress).
+- [x] P0 review follow-ups integrated: structural CSV validation, history-export guard, and reporting metadata; 303 integrated tests passed.
+- [x] Opus 5.5 API/CLI/export spec and quality approval at `4e16e0d`; all findings resolved.
+- [ ] Opus 5.5 core/data/math re-approval after structural CSV validation fix.
+- [ ] P1 revisions: stable-ID selection, carry/reset wording, selected-player window comparison, directory presets, and temporal chart.
+- [ ] Opus 5.5 dashboard spec and quality re-approval.
 - [ ] Final full-suite/build/smoke verification and delivery report.
 
 Reviewer policy: implementation workers stay on DeepSeek V4.1 Flash; independent

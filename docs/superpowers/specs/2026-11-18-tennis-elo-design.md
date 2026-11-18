@@ -152,13 +152,22 @@ Support data-directory input, discovered-season selection, one/two/three season
 presets, and explicit season selection validated by the same API. Controls for
 K, initial rating, retirement policy, and minimum matches. Show searchable,
 sortable leaderboard, exclusion summary, player selector keyed by stable ID,
-player rating chart and match history, downloadable rankings/history.
+player rating chart and match history, downloadable rankings/history. Persist
+player selection by the original player ID, not by the display label, including
+when aliases differ across windows. The chart uses a temporal UTC axis and keeps
+one point per match. Reapply the selected window preset when the input directory
+changes; do not retain a silently shortened selection from the old directory.
 
 Compare independent one-, two-, and three-season calculations ending at a chosen
-season. If earlier seasons are unavailable, label those windows unavailable;
-do not mislabel a shorter calculation as a longer window. Explain that all
-windows independently start from the initial rating, not continuous annual Elo
-changes. No remote deployment or authentication in P1. Avoid HTML injection from
+season, including the selected player's Elo, global rank, and match count in each
+window. Changing the selected player should reuse the cached per-window results.
+Distinguish an unavailable window from an available window in which that player
+has no eligible matches; never assign an invented rating to an unrated player.
+Dataset-level counts and leaders may be shown as secondary context. If earlier
+seasons are unavailable, label those windows unavailable; do not mislabel a
+shorter calculation as a longer window. Explicitly explain that ratings carry
+between selected seasons within one run, but independent comparison windows
+start from the initial rating and are not continuous annual Elo changes. No remote deployment or authentication in P1. Avoid HTML injection from
 CSV names; rely on safe Streamlit widgets. Do not launch a long-lived server
 while implementing; use Streamlit AppTest and a bounded headless smoke test.
 
