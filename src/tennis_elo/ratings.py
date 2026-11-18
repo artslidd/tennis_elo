@@ -14,6 +14,15 @@ Replay itself only sorts, replays and aggregates. It never re-validates or drops
 rows (that would hide accounting errors) and never mutates the caller's matches,
 list or configuration. Every call starts fresh at ``config.initial_rating``; no
 module-level state is shared between calls.
+
+Every match's ``tournament_level`` is validated against the canonical table with
+``coefficient_for_level`` in both weighted and unweighted modes, so a misspelled
+level fails loudly instead of silently behaving like the fallback. Replay then
+performs one pure Elo update per match with
+``config.k_factor * applied_coefficient`` for both players, where the applied
+coefficient is the level's coefficient when ``config.use_tournament_weights`` is
+enabled and 1.0 when it is disabled (classic Elo). Ratings and expected scores
+are never multiplied by the coefficient.
 """
 
 from collections.abc import Iterable
@@ -21,6 +30,7 @@ from dataclasses import dataclass
 
 from .elo import expected_score, update_ratings
 from .models import HistoryEntry, Match, PlayerRating, RatingConfig, RatingResult
+from .weighting import coefficient_for_level
 
 
 @dataclass
@@ -65,6 +75,9 @@ def _history_entry(
     opponent_rating_before: float,
     expected: float,
     rating_after: float,
+    tournament_level: str,
+    tournament_weight: float,
+    effective_k_factor: float,
 ) -> HistoryEntry:
     return HistoryEntry(
         match_id=match.match_id,
@@ -81,6 +94,9 @@ def _history_entry(
         rating_after=rating_after,
         tournament=match.tournament,
         surface=match.surface,
+        tournament_level=tournament_level,
+        tournament_weight=tournament_weight,
+        effective_k_factor=effective_k_factor,
     )
 
 
@@ -97,12 +113,14 @@ def rate_matches(
     The latest observed name is reported. Players come out sorted by descending
     rating and then ascending player ID. With ``include_history`` each match
     contributes two entries, home first then away, carrying the pre-match
-    ratings, the public ``expected_score``, the outcome and the new rating.
+    ratings, the public ``expected_score``, the outcome, the new rating and the
+    match's actual tournament level, applied coefficient and effective K-factor.
     An empty input yields an empty, valid result.
     """
     rating_config = RatingConfig() if config is None else config
     initial_rating = rating_config.initial_rating
-    k_factor = rating_config.k_factor
+    base_k_factor = rating_config.k_factor
+    use_tournament_weights = rating_config.use_tournament_weights
 
     ordered_matches = sorted(matches, key=_replay_key)
 
@@ -127,10 +145,15 @@ def rate_matches(
         expected_home = expected_score(home_before, away_before)
         expected_away = expected_score(away_before, home_before)
         home_won = match.winner_code == 1
+        # Validate the canonical level even when weighting is disabled, then
+        # scale base K by the applied coefficient for both players at once.
+        coefficient = coefficient_for_level(match.tournament_level)
+        applied_coefficient = coefficient if use_tournament_weights else 1.0
+        effective_k_factor = base_k_factor * applied_coefficient
         # Both new ratings come from the two pre-match ratings, never from a
         # partially updated pairing.
         home_after, away_after = update_ratings(
-            home_before, away_before, match.winner_code, k_factor=k_factor
+            home_before, away_before, match.winner_code, k_factor=effective_k_factor
         )
         home.rating = home_after
         away.rating = away_after
@@ -150,6 +173,9 @@ def rate_matches(
                     opponent_rating_before=away_before,
                     expected=expected_home,
                     rating_after=home_after,
+                    tournament_level=match.tournament_level,
+                    tournament_weight=applied_coefficient,
+                    effective_k_factor=effective_k_factor,
                 )
             )
             history.append(
@@ -164,6 +190,9 @@ def rate_matches(
                     opponent_rating_before=home_before,
                     expected=expected_away,
                     rating_after=away_after,
+                    tournament_level=match.tournament_level,
+                    tournament_weight=applied_coefficient,
+                    effective_k_factor=effective_k_factor,
                 )
             )
 
