@@ -35,12 +35,19 @@ Include ATP Tour and ATP Chall, including qualifying. Include normally finished
 matches and retirements with winner code 1 (home) or 2 (away). Allow retirements to
 be excluded. Exclude exhibitions, unsupported tours, walkovers, awarded, canceled,
 scheduled, unfinished, and invalid-winner records with explicit reason counts.
-Use status_extra, not status alone: some canceled records have status FINISHED.
-No inferred winner from score or ATP rank. Surface can be unknown.
+Use status_extra when populated, not status alone: some canceled records have
+status FINISHED. If status_extra is blank, fall back to status. No inferred winner
+from score or ATP rank. Surface can be unknown.
 
-Deduplicate selected-season rows by match_id. Ignore exact duplicates, count them,
-and reject conflicting duplicate records. Reject malformed eligible rows with
-file/row context (bad timestamp, missing IDs, same player on both sides, etc.).
+Deduplicate selected-season rows by match_id using all Elo-relevant columns
+(required and optional descriptive fields). Ignore identical signatures, count
+them, and reject conflicting signatures; differences solely in unused betting,
+ranking or score statistics do not change the Elo input. Reject malformed
+eligible rows with file/row context (bad timestamp, missing IDs, same player on
+both sides, etc.). Timestamps must be integer seconds representable as a UTC
+Python datetime; reject millisecond epochs and out-of-range values rather than
+letting later exports fail. Season selections must contain actual integers, not
+booleans or coerced/truncated floats.
 Detect unavailable requested seasons rather than silently shortening a window.
 Decode UTF-8 with BOM support, and handle quoted CSV correctly.
 
