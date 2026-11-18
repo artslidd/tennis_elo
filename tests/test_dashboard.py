@@ -11,6 +11,7 @@ data files are available (parent integration).
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
 import sys
 import types
@@ -24,11 +25,13 @@ from tennis_elo.dashboard_views import (
     CLASSIFICATION_COLUMNS,
     COEFFICIENT_COLUMNS,
     COMPARISON_COLUMNS,
+    DATA_DIR_ENV,
     FRESH_START_NOTICE,
     HISTORY_COLUMNS,
     LEADERBOARD_COLUMNS,
     MISSING_DASHBOARD_DEPENDENCIES,
     PLAYER_COMPARISON_COLUMNS,
+    TOP_PLAYERS_ENV,
     UNKNOWN_TOURNAMENT_COLUMNS,
     build_player_options,
     build_rating_config,
@@ -58,6 +61,8 @@ from tennis_elo.dashboard_views import (
     sort_ranking_rows,
     timestamp_to_datetime_utc,
     timestamp_to_iso_date,
+    top_players_chart_rows,
+    top_players_limit,
     tournament_weighting_report,
     weighting_mode_notice,
     window_label,
@@ -76,6 +81,7 @@ from tennis_elo.weighting import TOURNAMENT_COEFFICIENTS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = REPO_ROOT / "src" / "tennis_elo" / "dashboard.py"
+DEPLOY_APP_PATH = REPO_ROOT / "deploy" / "streamlit_app.py"
 REAL_CSV = REPO_ROOT / "2026-atp-season.csv"
 
 HOSTILE_NAME = "<img src=x onerror=alert(1)>"
@@ -819,6 +825,48 @@ def test_elo_chart_rows_keep_same_day_matches_distinct_and_ordered():
     assert [point["rating"] for point in points] == [1508.0, 1516.0]
 
 
+def test_top_players_chart_rows_cover_the_top_ranked_players_in_rank_order():
+    ranking = list(reversed(make_ranking_rows()))  # input order must not matter
+    points = top_players_chart_rows(ranking, make_history_rows(), limit=2)
+    assert {point["player_id"] for point in points} == {"p1", "p2"}
+    # Legend labels sort in rank order and stay distinct even for duplicate names.
+    assert sorted({point["player"] for point in points}) == ["#01 Alpha A.", "#02 Alpha A."]
+    p1 = [point for point in points if point["player_id"] == "p1"]
+    assert [point["rating"] for point in p1] == [1516.0, 1498.6, 1532.5]
+    assert all(isinstance(point["match_date"], datetime) for point in points)
+
+
+def test_top_players_chart_rows_respect_min_matches_and_handle_empty_input():
+    points = top_players_chart_rows(make_ranking_rows(), make_history_rows(), min_matches=2)
+    assert {point["player_id"] for point in points} == {"p1", "p2"}
+    assert top_players_chart_rows([], make_history_rows()) == ()
+    assert top_players_chart_rows(make_ranking_rows(), []) == ()
+
+
+def test_top_players_chart_rows_default_to_twenty_players():
+    ranking = [
+        {"rank": rank, "player_id": f"q{rank}", "name": f"Q{rank}", "matches": 1}
+        for rank in range(1, 26)
+    ]
+    history = [
+        {"player_id": f"q{rank}", "match_id": f"m{rank}", "timestamp": TS_1, "rating_after": 1500}
+        for rank in range(1, 26)
+    ]
+    points = top_players_chart_rows(ranking, history)
+    assert [point["player_id"] for point in points] == [f"q{rank}" for rank in range(1, 21)]
+
+
+def test_top_players_limit_parses_and_clamps_the_configured_value():
+    assert top_players_limit(None) == 20
+    assert top_players_limit("") == 20
+    assert top_players_limit("10") == 10
+    assert top_players_limit(" 7 ") == 7
+    assert top_players_limit("abc") == 20
+    assert top_players_limit("0") == 1
+    assert top_players_limit("500") == 50
+    assert TOP_PLAYERS_ENV == "TENNIS_ELO_TOP_PLAYERS"
+
+
 def test_player_stat_rows_include_win_rate_and_ids():
     stats = {row["stat"]: row["value"] for row in player_stat_rows(make_ranking_rows()[0])}
     assert stats["Player ID"] == "p1"
@@ -991,6 +1039,31 @@ def test_launcher_main_reports_missing_dashboard_extra(monkeypatch, capsys):
     assert dashboard_launcher.main([]) == 1
     captured = capsys.readouterr()
     assert "uv sync --extra dashboard" in captured.err
+
+
+def test_launcher_top_players_flag_is_exposed_to_the_app_and_restored(monkeypatch):
+    seen = {}
+
+    def fake_cli_main():
+        seen["value"] = os.environ.get(TOP_PLAYERS_ENV)
+        seen["argv"] = list(sys.argv)
+        return 0
+
+    monkeypatch.setattr(dashboard_launcher, "_import_streamlit_cli_main", lambda: fake_cli_main)
+    monkeypatch.delenv(TOP_PLAYERS_ENV, raising=False)
+    assert dashboard_launcher.main(["--top-players", "10"]) == 0
+    assert seen["value"] == "10"
+    assert not any("top-players" in item for item in seen["argv"])  # not forwarded to Streamlit
+    assert TOP_PLAYERS_ENV not in os.environ
+
+    assert dashboard_launcher.main([]) == 0
+    assert seen["value"] is None
+
+
+def test_launcher_rejects_invalid_top_players(capsys):
+    assert dashboard_launcher.main(["--top-players", "0"]) == 2
+    assert dashboard_launcher.main(["--top-players", "51"]) == 2
+    assert dashboard_launcher.main(["--top-players", "many"]) == 2
 
 
 def test_launcher_main_rejects_invalid_port(capsys):
@@ -1602,11 +1675,36 @@ def test_app_chart_uses_temporal_match_timestamps(monkeypatch):
     app = _run_app(monkeypatch)
     app.button(key="calculate").click().run()
     charts = app.get("vega_lite_chart")
-    assert len(charts) == 1
-    spec = charts[0].proto.spec
-    assert '"field": "match_date"' in spec
-    assert '"type": "temporal"' in spec
-    assert '"type": "nominal"' not in spec
+    assert len(charts) == 2  # top-20 timeseries + selected player chart
+    for chart in charts:
+        spec = chart.proto.spec
+        assert '"field": "match_date"' in spec
+        assert '"type": "temporal"' in spec
+    player_spec = charts[-1].proto.spec
+    assert '"type": "nominal"' not in player_spec
+
+
+def test_app_renders_top_players_rating_timeseries(monkeypatch):
+    app = _run_app(monkeypatch)
+    app.button(key="calculate").click().run()
+    assert not app.exception
+    top_spec = app.get("vega_lite_chart")[0].proto.spec
+    assert '"field": "player"' in top_spec  # one coloured series per player
+    assert "Top 20" in " ".join(element.value for element in app.markdown)
+    assert app.number_input(key="top_players").value == 20
+
+
+def test_app_top_players_control_limits_the_chart(monkeypatch):
+    monkeypatch.setenv(TOP_PLAYERS_ENV, "2")
+    app = _run_app(monkeypatch)
+    assert app.number_input(key="top_players").value == 2  # startup default from the launcher
+    app.button(key="calculate").click().run()
+    assert "Top 2 players" in " ".join(element.value for element in app.markdown)
+
+    app.number_input(key="top_players").set_value(1).run()
+    assert not app.exception
+    assert "Top 1 players" in " ".join(element.value for element in app.markdown)
+    assert not app.warning  # presentation only: the run is not stale
 
 
 def test_app_data_directory_change_reapplies_preset(monkeypatch, tmp_path):
@@ -1663,3 +1761,58 @@ def test_app_integration_with_real_p0_modules_and_data():
     assert len(leaderboard) > 0
     rankings_csv = app.download_button(key="download_rankings")
     assert rankings_csv.label == "Download rankings CSV"
+
+
+# --------------------------------------------------------------------------- #
+# Hosted deployment (fixed data directory, Community Cloud entrypoint)
+# --------------------------------------------------------------------------- #
+
+
+def test_app_fixed_data_dir_hides_the_free_text_directory_input(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path))
+    app = _run_app(monkeypatch, calls=calls)
+    assert not app.exception
+    assert not [widget for widget in app.text_input if widget.key == "input_dir"]
+    assert ("available_seasons", str(tmp_path.resolve())) in calls
+    sidebar_text = " ".join(element.value for element in app.sidebar.caption)
+    assert "fixed by this deployment" in sidebar_text
+    assert str(tmp_path) not in sidebar_text  # server paths are not shown to visitors
+
+    app.button(key="calculate").click().run()
+    assert not app.exception
+    assert _frame(app, LEADERBOARD_COLUMNS) is not None
+
+
+def test_app_blank_data_dir_env_keeps_the_local_directory_input(monkeypatch):
+    monkeypatch.setenv(DATA_DIR_ENV, "  ")
+    app = _run_app(monkeypatch)
+    assert app.text_input(key="input_dir") is not None
+
+
+def test_deploy_requirements_pin_the_locked_dashboard_dependencies():
+    lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
+    pins = {}
+    for line in (REPO_ROOT / "deploy" / "requirements.txt").read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            name, version = line.split("==")
+            pins[name] = version
+    assert set(pins) == {"streamlit", "pandas"}
+    for name, version in pins.items():
+        assert f'name = "{name}"\nversion = "{version}"' in lock
+
+
+def test_deploy_entrypoint_serves_the_repo_data_without_a_directory_input(monkeypatch):
+    pytest.importorskip("tennis_elo.api")
+    # Empty means unset; monkeypatch restores the original environment afterwards.
+    monkeypatch.setenv(DATA_DIR_ENV, "")
+    app = AppTest.from_file(str(DEPLOY_APP_PATH), default_timeout=300)
+    app.run()
+    assert not app.exception
+    assert not [widget for widget in app.text_input if widget.key == "input_dir"]
+    assert {2024, 2025, 2026} <= {int(option) for option in app.selectbox(key="end_season").options}
+
+    app.button(key="calculate").click().run()
+    assert not app.exception, _texts(app.error)
+    assert len(_frame(app, LEADERBOARD_COLUMNS)) > 0

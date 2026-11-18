@@ -285,6 +285,15 @@ tournament-weighting checkbox that is on by default, alongside the base K
 factor, and switching it marks earlier calculations stale until they are
 recalculated.
 
+A chart shows the Elo rating over time of the top-ranked players (20 by
+default). Set the startup count with `--top-players N` (1-50) or the
+`TENNIS_ELO_TOP_PLAYERS` environment variable, and adjust it live with the
+"Top players in chart" sidebar control (presentation only, no recalculation):
+
+```bash
+uv run --extra dashboard tennis-elo-dashboard --top-players 10
+```
+
 ## Development
 
 ```bash

@@ -15,6 +15,7 @@ and pandas (see the design spec).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -26,12 +27,15 @@ from tennis_elo.dashboard_views import (
     CLASSIFICATION_COLUMNS,
     COEFFICIENT_COLUMNS,
     COMPARISON_COLUMNS,
+    DATA_DIR_ENV,
     DEFAULT_INITIAL_RATING,
     DEFAULT_K_FACTOR,
     FRESH_START_NOTICE,
     HISTORY_COLUMNS,
     LEADERBOARD_COLUMNS,
+    MAX_TOP_PLAYERS,
     PLAYER_COMPARISON_COLUMNS,
+    TOP_PLAYERS_ENV,
     UNKNOWN_TOURNAMENT_COLUMNS,
     build_player_options,
     build_rating_config,
@@ -58,6 +62,8 @@ from tennis_elo.dashboard_views import (
     season_selection_problem,
     season_window_plan,
     sort_ranking_rows,
+    top_players_chart_rows,
+    top_players_limit,
     tournament_weighting_report,
     window_label,
     window_plans,
@@ -172,13 +178,19 @@ def _discover_seasons(directory: str) -> dict[str, Any]:
 
 def _sidebar() -> dict[str, Any]:
     st.sidebar.header("Data")
-    entered = st.sidebar.text_input(
-        "Season CSV directory",
-        value=str(Path.cwd()),
-        key="input_dir",
-        help="Directory that contains the *-atp-season.csv files.",
-    )
-    directory = plain_text(entered) or str(Path.cwd())
+    fixed_directory = plain_text(os.environ.get(DATA_DIR_ENV))
+    if fixed_directory:
+        # Hosted mode: never let visitors choose server-side paths.
+        directory = fixed_directory
+        st.sidebar.caption("Season CSVs: fixed by this deployment.")
+    else:
+        entered = st.sidebar.text_input(
+            "Season CSV directory",
+            value=str(Path.cwd()),
+            key="input_dir",
+            help="Directory that contains the *-atp-season.csv files.",
+        )
+        directory = plain_text(entered) or str(Path.cwd())
     try:
         canonical = str(Path(directory).expanduser().resolve())
     except OSError:
@@ -280,6 +292,18 @@ def _sidebar() -> dict[str, Any]:
         "Elo updates, which always include every eligible match.",
     )
 
+    top_players = st.sidebar.number_input(
+        "Top players in chart",
+        min_value=1,
+        max_value=MAX_TOP_PLAYERS,
+        value=top_players_limit(os.environ.get(TOP_PLAYERS_ENV)),
+        step=1,
+        key="top_players",
+        help="How many of the best-ranked players the rating-over-time chart shows. "
+        "Set the startup value with `tennis-elo-dashboard --top-players N`. "
+        "Presentation only: changing it never recalculates ratings.",
+    )
+
     control_problem = control_error(initial_rating=initial_rating, k_factor=k_factor)
     if control_problem:
         st.sidebar.error(control_problem)
@@ -307,6 +331,7 @@ def _sidebar() -> dict[str, Any]:
         "end_year": end_year,
         "config": config,
         "min_matches": int(min_matches),
+        "top_players": int(top_players),
         "calculate": calculate_clicked,
     }
 
@@ -483,6 +508,36 @@ def _render_leaderboard(run: Mapping[str, Any], state: Mapping[str, Any]) -> Non
         )
 
 
+def _render_top_players_chart(run: Mapping[str, Any], state: Mapping[str, Any]) -> None:
+    """Elo timeseries of the top-ranked players, one coloured line per player."""
+    points = top_players_chart_rows(
+        run["ranking_rows"],
+        run["history_rows"],
+        limit=state["top_players"],
+        min_matches=state["min_matches"],
+    )
+    st.markdown(f"**Top {state['top_players']} players: Elo rating over time**")
+    if not points:
+        st.info("No match history is available for the top-ranked players.")
+        return
+    st.caption(
+        "Current top players by rank (after the minimum-match filter), with their rating "
+        "after every match in the selected seasons. Legend entries are prefixed by rank."
+    )
+    frame = pd.DataFrame(list(points))
+    # Timezone-aware UTC timestamps keep one temporal point per match.
+    frame["match_date"] = pd.to_datetime(frame["match_date"], utc=True)
+    st.line_chart(
+        frame,
+        x="match_date",
+        y="rating",
+        color="player",
+        x_label="Match date",
+        y_label="Elo rating",
+        height=480,
+    )
+
+
 def _label_formatter(labels: Mapping[str, str]) -> Callable[[str], str]:
     """Build a selectbox label formatter for the current run's player labels.
 
@@ -585,6 +640,7 @@ def _render_run(state: Mapping[str, Any]) -> None:
     _render_metadata(run)
     _render_weighting(run)
     _render_leaderboard(run, state)
+    _render_top_players_chart(run, state)
     _render_player(run)
 
 

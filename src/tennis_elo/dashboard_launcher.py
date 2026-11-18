@@ -14,12 +14,13 @@ run`` does); stop it with Ctrl-C.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from .dashboard_views import safe_label
+from .dashboard_views import MAX_TOP_PLAYERS, TOP_PLAYERS_CHART_LIMIT, TOP_PLAYERS_ENV, safe_label
 
 __all__ = [
     "APP_PATH",
@@ -55,6 +56,17 @@ def _port(value: str) -> int:
     return port
 
 
+def _top_players(value: str) -> int:
+    """Argparse type for the number of players in the top-players chart."""
+    try:
+        count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"top players must be an integer, got {value!r}") from None
+    if not 1 <= count <= MAX_TOP_PLAYERS:
+        raise argparse.ArgumentTypeError(f"top players must be between 1 and {MAX_TOP_PLAYERS}")
+    return count
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the launcher argument parser."""
     parser = argparse.ArgumentParser(
@@ -76,6 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--headless",
         action="store_true",
         help="do not open a browser window (useful for smoke tests and servers)",
+    )
+    parser.add_argument(
+        "--top-players",
+        type=_top_players,
+        default=None,
+        metavar="N",
+        help="players in the top-players rating chart at startup "
+        f"(1-{MAX_TOP_PLAYERS}, default: {TOP_PLAYERS_CHART_LIMIT}; adjustable in the sidebar)",
     )
     parser.add_argument(
         "streamlit_args",
@@ -155,7 +175,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Could not start Streamlit: {safe_label(exc)}", file=sys.stderr)
         return 1
 
-    return _run_streamlit_cli(streamlit_argv, cli_main)
+    if args.top_players is None:
+        return _run_streamlit_cli(streamlit_argv, cli_main)
+    # Streamlit runs the app in this process, so the environment carries the setting.
+    previous = os.environ.get(TOP_PLAYERS_ENV)
+    os.environ[TOP_PLAYERS_ENV] = str(args.top_players)
+    try:
+        return _run_streamlit_cli(streamlit_argv, cli_main)
+    finally:
+        if previous is None:
+            os.environ.pop(TOP_PLAYERS_ENV, None)
+        else:
+            os.environ[TOP_PLAYERS_ENV] = previous
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through the console script

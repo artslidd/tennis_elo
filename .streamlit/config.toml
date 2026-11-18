@@ -1,0 +1,7 @@
+# Read by Streamlit (locally and on Community Cloud) from the repository root.
+[browser]
+gatherUsageStats = false
+
+[client]
+# Hide the developer toolbar options from visitors of the hosted app.
+toolbarMode = "viewer"

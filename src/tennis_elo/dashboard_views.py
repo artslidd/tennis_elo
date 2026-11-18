@@ -27,13 +27,17 @@ __all__ = [
     "CLASSIFICATION_COLUMNS",
     "COEFFICIENT_COLUMNS",
     "COMPARISON_COLUMNS",
+    "DATA_DIR_ENV",
     "DEFAULT_INITIAL_RATING",
     "DEFAULT_K_FACTOR",
     "FRESH_START_NOTICE",
     "HISTORY_COLUMNS",
     "LEADERBOARD_COLUMNS",
+    "MAX_TOP_PLAYERS",
     "MISSING_DASHBOARD_DEPENDENCIES",
     "PLAYER_COMPARISON_COLUMNS",
+    "TOP_PLAYERS_CHART_LIMIT",
+    "TOP_PLAYERS_ENV",
     "UNKNOWN_TOURNAMENT_COLUMNS",
     "WEIGHTING_POLICY_NOTE",
     "WINDOW_SIZES",
@@ -71,6 +75,8 @@ __all__ = [
     "sort_ranking_rows",
     "timestamp_to_datetime_utc",
     "timestamp_to_iso_date",
+    "top_players_chart_rows",
+    "top_players_limit",
     "tournament_weighting_report",
     "weighting_mode_notice",
     "window_label",
@@ -80,6 +86,13 @@ __all__ = [
 DEFAULT_INITIAL_RATING = 1500.0
 DEFAULT_K_FACTOR = 32.0
 WINDOW_SIZES: tuple[int, ...] = (1, 2, 3)
+TOP_PLAYERS_CHART_LIMIT = 20  # default number of players in the top-players chart
+MAX_TOP_PLAYERS = 50
+# Set by ``tennis-elo-dashboard --top-players N``; also usable directly.
+TOP_PLAYERS_ENV = "TENNIS_ELO_TOP_PLAYERS"
+# Hosted deployments set this to pin the data directory: the free-text directory
+# input is then hidden, so visitors cannot point the server at other folders.
+DATA_DIR_ENV = "TENNIS_ELO_DATA_DIR"
 
 LEADERBOARD_COLUMNS: tuple[str, ...] = (
     "rank",
@@ -946,6 +959,74 @@ def elo_chart_rows(
                 "opponent": row["opponent"],
             }
         )
+    return tuple(points)
+
+
+def top_players_limit(value: Any) -> int:
+    """Parse a configured top-players count, clamped to ``1..MAX_TOP_PLAYERS``.
+
+    Missing or non-numeric values fall back to :data:`TOP_PLAYERS_CHART_LIMIT`, so a
+    bad environment value never breaks the dashboard.
+    """
+    text = plain_text(value)
+    if not text:
+        return TOP_PLAYERS_CHART_LIMIT
+    try:
+        count = int(text)
+    except ValueError:
+        return TOP_PLAYERS_CHART_LIMIT
+    return min(max(count, 1), MAX_TOP_PLAYERS)
+
+
+def top_players_chart_rows(
+    ranking_rows: Iterable[Mapping[str, Any]],
+    history_rows: Iterable[Mapping[str, Any]],
+    *,
+    limit: int = TOP_PLAYERS_CHART_LIMIT,
+    min_matches: int = 0,
+) -> tuple[dict[str, Any], ...]:
+    """Rating-after-every-match points for the ``limit`` best-ranked players.
+
+    Players are taken in rank order after the leaderboard's presentation-only
+    ``min_matches`` filter. Each point carries a ``player`` series label prefixed
+    with the zero-padded rank (``#01 Name``) so the chart legend sorts in rank
+    order and duplicate names stay distinct. History is grouped in one pass.
+    """
+    eligible = filter_ranking_rows(ranking_rows, min_matches=min_matches)
+    ordered = sorted(eligible, key=lambda row: _as_int(row.get("rank"), default=10**9))
+    top: dict[str, str] = {}
+    for row in ordered:
+        if len(top) >= max(0, int(limit)):
+            break
+        player_id = raw_player_id(row.get("player_id"))
+        if not player_id or player_id in top:
+            continue
+        rank = _as_int(row.get("rank"), default=len(top) + 1)
+        top[player_id] = f"#{rank:02d} {safe_label(row.get('name')) or player_id}"
+    if not top:
+        return ()
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {player_id: [] for player_id in top}
+    for row in history_rows:
+        player_id = raw_player_id(row.get("player_id"))
+        if player_id in grouped:
+            grouped[player_id].append(row)
+
+    points: list[dict[str, Any]] = []
+    for player_id, label in top.items():
+        for row in sorted(grouped[player_id], key=_history_sort_key):
+            rating = _as_float(row.get("rating_after"))
+            moment = timestamp_to_datetime_utc(row.get("timestamp"))
+            if rating is None or moment is None:
+                continue
+            points.append(
+                {
+                    "match_date": moment,
+                    "rating": round(rating, 1),
+                    "player": label,
+                    "player_id": player_id,
+                }
+            )
     return tuple(points)
 
 

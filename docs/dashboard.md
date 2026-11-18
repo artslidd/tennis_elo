@@ -169,3 +169,31 @@ through the UI; the integrated parent checkout runs it for real.
 
 A bounded manual smoke test of the launcher (start headless, request
 `/_stcore/health`, terminate, confirm the port is free) leaves no server behind.
+
+## Hosted deployment (Streamlit Community Cloud)
+
+`deploy/streamlit_app.py` is the hosted entrypoint. It imports the package from
+`src/`, and pins the data directory to the repository root through
+`TENNIS_ELO_DATA_DIR`. While that variable is set, the free-text directory input
+is hidden, so visitors cannot point the server at other folders.
+`deploy/requirements.txt` sits next to the entrypoint, so Community Cloud uses it
+instead of the root `uv.lock`. Its pins must match `uv.lock`, and a test checks
+this. `.streamlit/config.toml` turns off usage telemetry.
+
+Only the season CSVs committed to git get deployed. Before you make the app
+public, check that their source allows redistribution.
+
+1. Push the repository to GitHub. A private repo gives a private app; Community
+   Cloud allows one private app per account.
+2. On share.streamlit.io choose **Create app**, then pick the repo, the branch,
+   and the main file `deploy/streamlit_app.py`. Under **Advanced settings**, set
+   Python to 3.12.
+3. Optional: in the app's **Secrets**, set `TENNIS_ELO_TOP_PLAYERS = "10"` (root
+   secrets are exposed as environment variables) to change the chart's starting
+   count.
+
+Run the hosted configuration locally with:
+
+```bash
+uv run --extra dashboard streamlit run deploy/streamlit_app.py
+```
