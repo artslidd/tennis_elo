@@ -12,11 +12,14 @@ import sys
 from pathlib import Path
 
 from . import api
-from .export import ranking_rows, write_outputs
+from .export import ranking_rows, summary_dict, write_outputs
 from .models import RatingConfig
+from .weighting import TOURNAMENT_COEFFICIENTS
 
 _DEFAULT_TOP = 20
 _NAME_WIDTH = 28
+_UNKNOWN_LIST_LIMIT = 10
+_BLANK_TOURNAMENT_LABEL = "(blank tournament name)"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,7 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="calculate rankings for one to three consecutive seasons",
         description=(
             "Calculate fresh-start Elo rankings for one to three distinct, "
-            "consecutive seasons and export them."
+            "consecutive seasons and export them. Tournament weighting is on by "
+            "default: each match uses effective K = base K x tournament "
+            "coefficient, and --unweighted selects classic Elo instead."
         ),
     )
     rank.add_argument(
@@ -62,7 +67,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--k-factor",
         type=float,
         default=32.0,
-        help="Elo K factor (default: 32)",
+        help=(
+            "BASE Elo K factor (default: 32). With tournament weighting the match "
+            "uses effective K = base K x tournament coefficient; with --unweighted "
+            "the match uses effective K = base K."
+        ),
+    )
+    rank.add_argument(
+        "--unweighted",
+        action="store_true",
+        help=(
+            "disable tournament weighting (classic Elo: effective K = base K for "
+            "every tournament, coefficient 1.0)"
+        ),
     )
     rank.add_argument(
         "--exclude-retirements",
@@ -114,6 +131,72 @@ def _format_table(rows: list[dict], top: int) -> str:
     return "\n".join(lines)
 
 
+def _model_lines(config: RatingConfig) -> list[str]:
+    """Report the active rating model and how it derives effective K."""
+
+    base = f"{config.k_factor:g}"
+    if not config.use_tournament_weights:
+        return [
+            (
+                f"Rating model: unweighted (effective K = base K = {base}; every "
+                "tournament coefficient is treated as 1.0)"
+            )
+        ]
+    coefficients = ", ".join(
+        f"{level}={coefficient!r}" for level, coefficient in TOURNAMENT_COEFFICIENTS.items()
+    )
+    return [
+        f"Rating model: tournament-weighted (effective K = base K x coefficient; base K = {base})",
+        f"Tournament coefficients: {coefficients}",
+    ]
+
+
+def _display_tournament(name: object) -> str:
+    """Flatten an untrusted tournament label onto one printable line."""
+
+    flattened = " ".join(str(name).split())
+    return flattened or _BLANK_TOURNAMENT_LABEL
+
+
+def _classification_lines(summary: dict) -> list[str]:
+    """Warn about unknown tournament categories without calling them exclusions.
+
+    Unknown names/years fall back to coefficient 1.0. That is reported in both
+    modes: when weighting is disabled the warning says the fallback has no
+    effect on ratings, so the classification is still visible. Full details stay
+    in the summary JSON; the CLI truncates a very long list.
+    """
+
+    weighting = summary["tournament_weighting"]
+    unknown = weighting["unknown_tournaments"]
+    if not unknown:
+        return []
+
+    count = weighting["unknown_matches"]
+    if weighting["enabled"]:
+        first = (
+            f"Classification: {count} matches use unknown tournament names/years; the "
+            "fallback coefficient 1.0 applies and they are not excluded or errors."
+        )
+    else:
+        first = (
+            f"Classification: {count} matches use unknown tournament names/years; "
+            "weighting is disabled, so the fallback coefficient 1.0 has no effect on "
+            "ratings and they are not excluded or errors."
+        )
+
+    shown = unknown[:_UNKNOWN_LIST_LIMIT]
+    detail = "Unknown tournaments: " + ", ".join(
+        f'{item["season_year"]} "{_display_tournament(item["tournament"])}" '
+        f'({item["matches"]})'
+        for item in shown
+    )
+    remaining = len(unknown) - len(shown)
+    if remaining > 0:
+        detail += f", ... and {remaining} more (full list in summary.json)"
+    return [first, detail]
+
+
 def _run_rank(args: argparse.Namespace) -> int:
     if args.min_matches < 0:
         return _fail("--min-matches must be greater than or equal to zero")
@@ -125,6 +208,7 @@ def _run_rank(args: argparse.Namespace) -> int:
             initial_rating=args.initial_rating,
             k_factor=args.k_factor,
             include_retirements=not args.exclude_retirements,
+            use_tournament_weights=not args.unweighted,
         )
     except ValueError as exc:
         return _fail(exc)
@@ -153,6 +237,10 @@ def _run_rank(args: argparse.Namespace) -> int:
         f"Seasons: {seasons}  |  matches: {result.ratings.matches_processed}"
         f"  |  players: {len(result.ratings.players)}"
     )
+    for line in _model_lines(result.config):
+        print(line)
+    for line in _classification_lines(summary_dict(result)):
+        print(line)
     print(f"Showing top {min(args.top, len(rows))} of {len(rows)} player rows")
     print(_format_table(rows, args.top))
     if result.load.excluded_counts:

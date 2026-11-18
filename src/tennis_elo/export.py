@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .weighting import TOURNAMENT_COEFFICIENTS
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .models import CalculationResult, HistoryEntry, PlayerRating
 
@@ -46,6 +48,9 @@ HISTORY_FIELDS: tuple[str, ...] = (
     "rating_after",
     "tournament",
     "surface",
+    "tournament_level",
+    "tournament_weight",
+    "effective_k_factor",
 )
 
 _RATING_DECIMALS = 2
@@ -112,6 +117,11 @@ def _history_row(entry: HistoryEntry) -> dict:
         "rating_after": round(entry.rating_after, _RATING_DECIMALS),
         "tournament": entry.tournament,
         "surface": entry.surface,
+        # Applied values recorded by replay. They are reported verbatim: never
+        # re-derived from the current config and never overwritten here.
+        "tournament_level": entry.tournament_level,
+        "tournament_weight": entry.tournament_weight,
+        "effective_k_factor": entry.effective_k_factor,
     }
 
 
@@ -142,12 +152,57 @@ def history_csv(result: CalculationResult) -> str:
     return _rows_to_csv(HISTORY_FIELDS, history_rows(result))
 
 
+def _tournament_weighting_summary(result: CalculationResult) -> dict:
+    """Classification accounting for every eligible loaded match.
+
+    Counting is deterministic and independent of replay: it reads the tagged
+    level from ``result.load.matches`` and never touches ratings. ``unknown`` is
+    the canonical fallback level, so unknown tournaments are grouped by
+    ``(season_year, tournament)`` and sorted; a missing or blank name stays an
+    empty string and is made readable by the CLI. Every canonical level is
+    present in ``matches_by_level`` (zero when unused) so keys are stable, and
+    the values always sum to the number of eligible matches.
+    """
+
+    counts = {level: 0 for level in TOURNAMENT_COEFFICIENTS}
+    unexpected: dict[str, int] = {}
+    unknown_tournaments: dict[tuple[int, str], int] = {}
+
+    for match in result.load.matches:
+        level = match.tournament_level
+        if level in counts:
+            counts[level] += 1
+        else:
+            unexpected[level] = unexpected.get(level, 0) + 1
+        if level == "unknown":
+            key = (match.season_year, match.tournament)
+            unknown_tournaments[key] = unknown_tournaments.get(key, 0) + 1
+
+    for level in sorted(unexpected):
+        counts[level] = unexpected[level]
+
+    return {
+        "enabled": result.config.use_tournament_weights,
+        "coefficients": dict(TOURNAMENT_COEFFICIENTS),
+        "matches_by_level": counts,
+        "unknown_matches": counts["unknown"],
+        "unknown_tournaments": [
+            {"season_year": year, "tournament": name, "matches": count}
+            for (year, name), count in sorted(unknown_tournaments.items())
+        ],
+    }
+
+
 def summary_dict(result: CalculationResult) -> dict:
     """JSON-serializable run summary with accounting and reset semantics.
 
     ``history_included`` reflects whether the result actually carries history
     entries. :func:`write_outputs` overrides it with the requested
     ``include_history`` flag so the summary matches the files it wrote.
+
+    ``configuration`` records the model that produced the ratings, including
+    whether tournament weighting was applied. ``tournament_weighting`` reports
+    the fixed coefficient table and deterministic classification accounting.
     """
 
     load = result.load
@@ -157,6 +212,7 @@ def summary_dict(result: CalculationResult) -> dict:
             "initial_rating": result.config.initial_rating,
             "k_factor": result.config.k_factor,
             "include_retirements": result.config.include_retirements,
+            "use_tournament_weights": result.config.use_tournament_weights,
         },
         "input_files": list(load.input_files),
         "available_seasons": list(load.available_seasons),
@@ -166,6 +222,7 @@ def summary_dict(result: CalculationResult) -> dict:
         "players_rated": len(result.ratings.players),
         "duplicate_rows": load.duplicate_rows,
         "excluded_counts": dict(load.excluded_counts),
+        "tournament_weighting": _tournament_weighting_summary(result),
         "history_included": bool(result.ratings.history),
         "fresh_start": True,
         "fresh_start_note": (

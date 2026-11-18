@@ -9,6 +9,7 @@ skipped until those lanes are integrated.
 
 import csv
 import importlib.util
+import json
 import subprocess
 import sys
 
@@ -49,16 +50,71 @@ def _history():
     )
 
 
-def build_result(*, seasons=(2024,), include_history=False, players=None):
-    matches = (Match("m1", seasons[0], TS_1, "p1", "p2", "Alice", "Bob", 1),)
-    load = LoadResult(matches, ("2024-atp-season.csv",), tuple(seasons), 3, 3, {"walkover": 1}, 0)
+def build_result(*, seasons=(2024,), include_history=False, players=None, load=None, config=None):
+    matches = (
+        Match(
+            "m1",
+            seasons[0],
+            TS_1,
+            "p1",
+            "p2",
+            "Alice",
+            "Bob",
+            1,
+            tournament="Brisbane International",
+            tournament_level="atp_250",
+        ),
+    )
+    if load is None:
+        load = LoadResult(
+            matches, ("2024-atp-season.csv",), tuple(seasons), 3, 3, {"walkover": 1}, 0
+        )
     history = _history() if include_history else ()
     return CalculationResult(
         tuple(seasons),
-        RatingConfig(),
+        config or RatingConfig(),
         load,
         RatingResult(_players() if players is None else players, history, 2),
     )
+
+
+def _unknown_load():
+    """Eligible matches whose categories the catalog could not classify."""
+
+    matches = (
+        Match(
+            "m1", 2024, TS_1, "p1", "p2", "Alice", "Bob", 1,
+            tournament="Mystery Cup", tournament_level="unknown",
+        ),
+        Match(
+            "m2", 2024, TS_2, "p1", "p3", "Alice", "Carol", 2,
+            tournament="", tournament_level="unknown",
+        ),
+        Match(
+            "m3", 2024, TS_2, "p2", "p3", "Bob", "Carol", 1,
+            tournament="Mystery Cup", tournament_level="unknown",
+        ),
+    )
+    return LoadResult(matches, ("2024-atp-season.csv",), (2024,), 3, 3, {"walkover": 1}, 0)
+
+
+@pytest.fixture
+def fake_calculate_with_unknowns(monkeypatch):
+    """Patch the calculation seam with a run that has unknown categories."""
+
+    calls: list[dict] = []
+
+    def _fake(input_dir, seasons, *, config=None, include_history=False):
+        calls.append({"config": config, "include_history": include_history})
+        return build_result(
+            seasons=tuple(sorted(seasons)),
+            include_history=include_history,
+            load=_unknown_load(),
+            config=config,
+        )
+
+    monkeypatch.setattr(api, "calculate", _fake)
+    return calls
 
 
 @pytest.fixture
@@ -76,7 +132,11 @@ def fake_calculate(monkeypatch):
                 "include_history": include_history,
             }
         )
-        return build_result(seasons=tuple(sorted(seasons)), include_history=include_history)
+        return build_result(
+            seasons=tuple(sorted(seasons)),
+            include_history=include_history,
+            config=config,
+        )
 
     monkeypatch.setattr(api, "calculate", _fake)
     return calls
@@ -281,6 +341,235 @@ def test_python_m_entry_point_reports_errors_without_traceback(tmp_path):
     assert completed.returncode == 2
     assert "distinct" in completed.stderr
     assert "Traceback" not in completed.stderr
+
+
+# --- Tournament weighting model, help, output and unknown-category reports --
+
+
+def test_rank_defaults_to_the_tournament_weighted_model(tmp_path, fake_calculate):
+    status = main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path)])
+
+    assert status == 0
+    assert fake_calculate[0]["config"].use_tournament_weights is True
+
+
+def test_rank_unweighted_flag_selects_classic_elo(tmp_path, fake_calculate):
+    status = main(
+        ["rank", "--seasons", "2024", "--output-dir", str(tmp_path), "--unweighted"]
+    )
+
+    assert status == 0
+    assert fake_calculate[0]["config"] == RatingConfig(use_tournament_weights=False)
+
+
+def test_rank_k_factor_is_the_base_k_next_to_unweighted(tmp_path, fake_calculate):
+    main(
+        [
+            "rank",
+            "--seasons",
+            "2024",
+            "--output-dir",
+            str(tmp_path),
+            "--k-factor",
+            "16",
+            "--unweighted",
+        ]
+    )
+
+    assert fake_calculate[0]["config"] == RatingConfig(
+        k_factor=16.0, use_tournament_weights=False
+    )
+
+
+def test_rank_rejects_base_k_that_overflows_the_weighted_effective_k(tmp_path, capsys):
+    target = tmp_path / "out"
+
+    status = main(
+        ["rank", "--seasons", "2024", "--output-dir", str(target), "--k-factor", "1e308"]
+    )
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "effective K" in captured.err
+    assert "Traceback" not in captured.err
+    assert not target.exists()
+
+
+def test_rank_help_documents_base_k_effective_k_and_the_unweighted_flag(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["rank", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "--unweighted" in out
+    assert "tournament weighting" in out
+    assert "base K" in out
+    assert "effective K" in out
+    assert "coefficient" in out
+
+
+def test_rank_output_identifies_the_weighted_model(tmp_path, fake_calculate, capsys):
+    main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert (
+        "Rating model: tournament-weighted (effective K = base K x coefficient; base K = 32)"
+        in out
+    )
+    assert (
+        "Tournament coefficients: challenger=0.75, atp_250=1.0, atp_500=1.25, "
+        "masters_1000=1.5, atp_finals=1.75, grand_slam=2.0, other=1.0, unknown=1.0" in out
+    )
+
+
+def test_rank_output_reports_the_configured_base_k(tmp_path, fake_calculate, capsys):
+    main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path), "--k-factor", "16"])
+
+    assert "base K = 16" in capsys.readouterr().out
+
+
+def test_rank_output_identifies_the_unweighted_model(tmp_path, fake_calculate, capsys):
+    main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path), "--unweighted"])
+
+    out = capsys.readouterr().out
+    assert (
+        "Rating model: unweighted (effective K = base K = 32; every tournament coefficient is "
+        "treated as 1.0)" in out
+    )
+    assert "challenger" not in out
+
+
+def test_rank_warns_about_unknown_tournaments_without_excluding_them(
+    tmp_path, fake_calculate_with_unknowns, capsys
+):
+    status = main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert status == 0
+    assert (
+        "Classification: 3 matches use unknown tournament names/years; the fallback coefficient "
+        "1.0 applies and they are not excluded or errors." in out
+    )
+    assert (
+        'Unknown tournaments: 2024 "(blank tournament name)" (1), 2024 "Mystery Cup" (2)' in out
+    )
+    # Unknown categories are reported, never counted as exclusions or errors.
+    assert "Excluded rows: walkover=1" in out
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["tournament_weighting"]["enabled"] is True
+    assert summary["tournament_weighting"]["unknown_matches"] == 3
+    assert summary["tournament_weighting"]["unknown_tournaments"] == [
+        {"season_year": 2024, "tournament": "", "matches": 1},
+        {"season_year": 2024, "tournament": "Mystery Cup", "matches": 2},
+    ]
+
+
+def test_rank_still_reports_unknowns_when_weighting_is_disabled(
+    tmp_path, fake_calculate_with_unknowns, capsys
+):
+    status = main(
+        ["rank", "--seasons", "2024", "--output-dir", str(tmp_path), "--unweighted"]
+    )
+
+    out = capsys.readouterr().out
+    assert status == 0
+    assert (
+        "Classification: 3 matches use unknown tournament names/years; weighting is disabled, so "
+        "the fallback coefficient 1.0 has no effect on ratings and they are not excluded or "
+        "errors." in out
+    )
+    assert 'Unknown tournaments: 2024 "(blank tournament name)" (1), 2024 "Mystery Cup" (2)' in out
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["tournament_weighting"]["enabled"] is False
+    assert summary["configuration"]["use_tournament_weights"] is False
+    assert summary["tournament_weighting"]["unknown_matches"] == 3
+
+
+def test_rank_does_not_warn_when_every_tournament_is_classified(
+    tmp_path, fake_calculate, capsys
+):
+    main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert "unknown tournament names/years" not in out
+    assert "Unknown tournaments:" not in out
+
+
+def _classification_lines(text: str) -> list[str]:
+    return [
+        line
+        for line in text.splitlines()
+        if line.startswith(("Classification:", "Unknown tournaments:"))
+    ]
+
+
+def test_rank_unknown_report_is_deterministic(tmp_path, fake_calculate_with_unknowns, capsys):
+    assert main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path / "one")]) == 0
+    first = _classification_lines(capsys.readouterr().out)
+    assert main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path / "two")]) == 0
+    second = _classification_lines(capsys.readouterr().out)
+
+    assert first
+    assert first == second
+
+
+def test_rank_unknown_report_caps_detail_and_points_at_the_summary(tmp_path, monkeypatch, capsys):
+    matches = tuple(
+        Match(
+            f"m{i:02d}", 2024, TS_1 + i, "p1", "p2", "Alice", "Bob", 1,
+            tournament=f"Event {i:02d}", tournament_level="unknown",
+        )
+        for i in range(12)
+    )
+    load = LoadResult(matches, ("2024-atp-season.csv",), (2024,), 12, 12, {}, 0)
+
+    def _fake(input_dir, seasons, *, config=None, include_history=False):
+        return build_result(
+            seasons=tuple(sorted(seasons)), include_history=include_history, load=load
+        )
+
+    monkeypatch.setattr(api, "calculate", _fake)
+    status = main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    detail = next(line for line in out.splitlines() if line.startswith("Unknown tournaments:"))
+    assert status == 0
+    assert "Event 09" in detail
+    assert "Event 10" not in detail
+    assert "2 more" in detail
+    assert "summary.json" in detail
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert len(summary["tournament_weighting"]["unknown_tournaments"]) == 12
+
+
+def test_rank_flattens_untrusted_tournament_labels_in_the_report(tmp_path, monkeypatch, capsys):
+    matches = (
+        Match(
+            "m1", 2024, TS_1, "p1", "p2", "Alice", "Bob", 1,
+            tournament="Line One\nfake: not excluded", tournament_level="unknown",
+        ),
+    )
+    load = LoadResult(matches, ("2024-atp-season.csv",), (2024,), 1, 1, {}, 0)
+
+    def _fake(input_dir, seasons, *, config=None, include_history=False):
+        return build_result(
+            seasons=tuple(sorted(seasons)), include_history=include_history, load=load
+        )
+
+    monkeypatch.setattr(api, "calculate", _fake)
+    main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert 'Unknown tournaments: 2024 "Line One fake: not excluded" (1)' in out
+    assert "Line One\nfake" not in out
+    # The summary keeps the raw, untrusted label as data.
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["tournament_weighting"]["unknown_tournaments"][0]["tournament"] == (
+        "Line One\nfake: not excluded"
+    )
 
 
 # --- Integration test: requires the data and engine lanes -------------------

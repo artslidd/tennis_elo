@@ -7,6 +7,10 @@ optional local Streamlit dashboard.
 Ratings use standard base-10 Elo (scale 400, default K = 32). Players are keyed
 by their string IDs, not names, and the latest observed name is displayed.
 
+Matches are **tournament-weighted** by default: each match multiplies the base K
+factor by a fixed coefficient for its tournament category. Pass `--unweighted`
+for classic Elo. See [Tournament weighting](#tournament-weighting-on-by-default).
+
 ## Requirements
 
 - Python 3.12+
@@ -45,6 +49,13 @@ uv run tennis-elo rank --seasons 2024 2025 2026 \
   --history
 ```
 
+Add `--unweighted` to compare against classic Elo, and `--k-factor` to change
+the **base** K:
+
+```bash
+uv run tennis-elo rank --seasons 2024 2025 2026 --unweighted --k-factor 16
+```
+
 `python -m tennis_elo` works exactly like the `tennis-elo` console script:
 
 ```bash
@@ -62,7 +73,66 @@ the selection, but never imported from seasons outside it.
 This means `--seasons 2026` and `--seasons 2024 2025 2026` are two independent
 calculations that both start from the initial rating; the longer window is not a
 continuation of the shorter one. The summary JSON marks this explicitly with
-`fresh_start`, `fresh_start_note`, and the configuration used.
+`fresh_start`, `fresh_start_note`, and the configuration used. Within one
+selection every window uses the same current configuration (including the
+tournament-weighting choice), but each window still starts fresh.
+
+## Tournament weighting (on by default)
+
+Each match updates both players with a tournament-scaled K factor, always
+derived from the same pre-match ratings:
+
+```text
+effective K = base K x tournament coefficient
+```
+
+| Canonical level | Category | Coefficient | `effective K` at base K 32 |
+| --- | --- | ---: | ---: |
+| `challenger` | ATP Challenger | 0.75 | 24 |
+| `atp_250` | ATP 250 | 1.00 | 32 |
+| `atp_500` | ATP 500 | 1.25 | 40 |
+| `masters_1000` | ATP Masters 1000 | 1.50 | 48 |
+| `atp_finals` | ATP Finals | 1.75 | 56 |
+| `grand_slam` | Grand Slam | 2.00 | 64 |
+| `other` | Team, Olympic and other nonstandard events | 1.00 | 32 |
+| `unknown` | Unclassified or unsupported name/year | 1.00 | 32 |
+
+The coefficients are fixed. `--k-factor` always means the **base** K, and only
+the K used for the update is scaled: ratings and expected scores are never
+multiplied, so updates stay zero-sum and ordering, eligibility, deduplication
+and the season windows are unchanged. The CLI prints the active model, the
+`effective K = base K x coefficient` rule and the coefficient table; `--unweighted`
+prints the classic model instead.
+
+Qualifying inherits its parent tournament's category, including Grand Slam
+qualifying, which therefore also uses 2.00. Team and nonstandard events (United
+Cup, Davis Cup, Hopman/Laver Cup, Olympics, Asian Games, Next Gen Finals, US
+Open WIC) use `other` at 1.00.
+
+Categories come from a deterministic, bundled, season-aware catalog that uses
+explicit per-season aliases and makes no network calls at runtime; the package
+stays standard-library-only. See `docs/tournament-levels.md` for the category
+sources and the supported seasons.
+
+Names or years the catalog does not cover fall back to `unknown` at coefficient
+1.00. They are never silently labelled ATP 250, never excluded, and never an
+error: `excluded_counts` and the exit status are unaffected. The run prints a
+`Classification:` line listing the unknown tournaments (a missing name is shown
+as `(blank tournament name)`, for example `2024 "(blank tournament name)" (2)`),
+and `summary.json` keeps the complete sorted list under
+`tournament_weighting`. The warning is printed in both modes; with
+`--unweighted` it states that the fallback coefficient has no effect on ratings.
+
+To compare against classic Elo, disable weighting explicitly:
+
+```bash
+uv run tennis-elo rank --seasons 2024 2025 2026 --unweighted
+```
+
+In unweighted mode every match uses `effective K = base K`, while history still
+records the classified level with coefficient 1.00 and the actual base K.
+Because the two modes produce different ratings, run them into separate
+`--output-dir` directories.
 
 ## Options
 
@@ -72,7 +142,8 @@ continuation of the shorter one. The summary JSON marks this explicitly with
 | `--input-dir DIR` | `.` | Directory containing `*-atp-season.csv` files. |
 | `--output-dir DIR` | `outputs/<selected-years>` | Fresh output directory. |
 | `--initial-rating FLOAT` | `1500` | Starting rating for every player. |
-| `--k-factor FLOAT` | `32` | Elo K factor; must be finite and positive. |
+| `--k-factor FLOAT` | `32` | Base Elo K; must be finite and positive. A weighted match uses `base K x tournament coefficient`. |
+| `--unweighted` | off | Disable tournament weighting: classic Elo, `effective K = base K` for every match. |
 | `--exclude-retirements` | off | Drop matches whose `status_extra` marks a retirement. |
 | `--history` | off | Also export one row per player per match. |
 | `--min-matches INT` | `0` | Only present players with at least this many matches. |
@@ -119,11 +190,24 @@ Each run writes into a fresh directory:
   Rows are ordered by descending rating, then player ID. All players are
   exported by default.
 - `history.csv` — written only with `--history`: one row per player per match
-  with every history field plus a UTC `date` column.
+  with every history field plus a UTC `date` column. The last three columns are
+  the applied `tournament_level`, `tournament_weight` and `effective_k_factor`
+  for that match. They are the values replay actually used, exported verbatim:
+  they are never re-derived from the current configuration and never
+  overwritten, so an unweighted run shows weight `1.0` next to its classified
+  level.
 - `summary.json` — `seasons`, `configuration`, `input_files`,
   `available_seasons`, `rows_read`, `selected_rows`, `matches_processed`,
-  `players_rated`, `duplicate_rows`, `excluded_counts`, `history_included`,
-  `reporting`, and the explicit fresh-start fields.
+  `players_rated`, `duplicate_rows`, `excluded_counts`, `tournament_weighting`,
+  `history_included`, `reporting`, and the explicit fresh-start fields.
+  `configuration` records `use_tournament_weights` next to `initial_rating`,
+  `k_factor` and `include_retirements`, so a run always states which model
+  produced it. `tournament_weighting` holds `enabled`, the fixed `coefficients`
+  table, `matches_by_level` (every canonical level, counted over the eligible
+  loaded matches), `unknown_matches`, and `unknown_tournaments` as
+  `{season_year, tournament, matches}` records sorted by
+  `(season_year, tournament)`. Counting is deterministic and never changes the
+  ratings.
 
 `reporting` records the presentation selection actually written: `min_matches`
 and the real `ranking_rows` exported. It makes a filtered export reproducible
@@ -165,6 +249,21 @@ for player in result.ratings.players[:5]:
 write_outputs(result, "reports/2025-2026", include_history=True)
 ```
 
+Tournament weighting is on by default, so the example above is weighted; the
+base K is `k_factor` and each match uses `k_factor * coefficient`. For classic
+Elo, opt out explicitly:
+
+```python
+from tennis_elo import RatingConfig
+
+weighted = RatingConfig(k_factor=32)                            # default
+unweighted = RatingConfig(k_factor=32, use_tournament_weights=False)
+```
+
+`use_tournament_weights` must be a `bool`. A base K whose weighted maximum
+(`base K x 2.0`) is not finite is rejected before any data is read; unweighted
+mode only requires a finite, positive base K.
+
 `calculate(input_dir, seasons, *, config=None, include_history=False)` validates
 and normalizes the seasons, loads the data, and replays the matches from a fresh
 start. `available_seasons(input_dir)` returns the seasons found in a directory.
@@ -181,7 +280,10 @@ uv run --extra dashboard tennis-elo-dashboard
 ```
 
 It serves on localhost by default. Importing `tennis_elo` never imports
-Streamlit or pandas.
+Streamlit or pandas. The dashboard offers the same model choice as the CLI: a
+tournament-weighting checkbox that is on by default, alongside the base K
+factor, and switching it marks earlier calculations stale until they are
+recalculated.
 
 ## Development
 
