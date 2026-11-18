@@ -82,12 +82,14 @@ def _history():
     )
 
 
-def build_result(*, players=None, history=(), config=None, load=None, seasons=(2024,)):
+def build_result(
+    *, players=None, history=(), config=None, load=None, seasons=(2024,), matches_processed=2
+):
     return CalculationResult(
         seasons,
         config or RatingConfig(),
         load or _load(),
-        RatingResult(_players() if players is None else players, tuple(history), 2),
+        RatingResult(_players() if players is None else players, tuple(history), matches_processed),
     )
 
 
@@ -322,3 +324,40 @@ def test_write_outputs_passes_min_matches_to_rankings(tmp_path):
     written = write_outputs(build_result(), tmp_path, min_matches=2)
     rows = list(csv.DictReader(io.StringIO(written["rankings"].read_text(encoding="utf-8"))))
     assert [row["player_id"] for row in rows] == ["p1", "p3"]
+
+
+def test_write_outputs_rejects_history_request_without_processed_history(tmp_path):
+    from tennis_elo.export import write_outputs
+
+    result = build_result(history=(), matches_processed=2)
+    target = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="include_history"):
+        write_outputs(result, target, include_history=True)
+
+    # Rejected before the output directory is created or touched.
+    assert not target.exists()
+
+
+def test_write_outputs_history_mismatch_fails_before_directory_checks(tmp_path):
+    from tennis_elo.export import write_outputs
+
+    (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="include_history"):
+        write_outputs(build_result(history=()), tmp_path, include_history=True)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["keep.txt"]
+
+
+def test_write_outputs_allows_history_request_with_zero_eligible_matches(tmp_path):
+    from tennis_elo.export import write_outputs
+
+    result = build_result(players=(), history=(), matches_processed=0)
+
+    written = write_outputs(result, tmp_path, include_history=True)
+
+    assert set(written) == {"rankings", "history", "summary"}
+    assert written["history"].read_text(encoding="utf-8") == HISTORY_HEADER + "\n"
+    summary = json.loads(written["summary"].read_text(encoding="utf-8"))
+    assert summary["history_included"] is True

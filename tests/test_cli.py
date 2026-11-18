@@ -204,6 +204,23 @@ def test_rank_rejects_non_empty_output_dir(tmp_path, fake_calculate, capsys):
     assert "Traceback" not in captured.err
 
 
+def test_rank_reports_history_mismatch_without_traceback(tmp_path, monkeypatch, capsys):
+    def calculate_without_history(input_dir, seasons, *, config=None, include_history=False):
+        # Simulates a result that was calculated without history entries.
+        return build_result(seasons=tuple(sorted(seasons)), include_history=False)
+
+    monkeypatch.setattr(api, "calculate", calculate_without_history)
+    target = tmp_path / "out"
+
+    status = main(["rank", "--seasons", "2024", "--output-dir", str(target), "--history"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert "include_history" in captured.err
+    assert "Traceback" not in captured.err
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("flag,value", [("--top", "-1"), ("--min-matches", "-1")])
 def test_rank_rejects_negative_limits(tmp_path, flag, value, capsys):
     status = main(["rank", "--seasons", "2024", "--output-dir", str(tmp_path), flag, value])

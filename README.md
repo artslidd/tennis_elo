@@ -133,6 +133,13 @@ A run refuses to write into a non-empty or non-directory output path instead of
 overwriting an earlier run. Empty directories are fine, and header-only exports
 are valid when no match qualifies.
 
+History must be requested on the calculation itself. In the Python API, call
+`calculate(..., include_history=True)` before `write_outputs(...,
+include_history=True)`; the writer rejects a result that processed matches but
+was calculated without history, rather than writing a misleading header-only
+`history.csv`. A run with zero eligible matches may still request history and
+write the valid header-only file.
+
 ## Python API
 
 ```python

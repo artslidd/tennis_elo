@@ -210,7 +210,24 @@ def write_outputs(
     A non-empty or non-directory target is rejected before it is changed. The
     returned mapping uses the keys ``rankings``, ``history`` (only when
     requested), and ``summary``.
+
+    Requesting ``include_history=True`` for a result that processed matches but
+    carries no history entries is a mismatch: it would write a header-only
+    history file and claim history was included. That raises ``ValueError``
+    before the output directory is created or touched, so callers must
+    recalculate with ``include_history=True``. A run with zero eligible matches
+    is still allowed to request history and write the valid header-only file.
+
+    Raises:
+        ValueError: when history is requested but was not calculated.
+        FileExistsError: when ``output_dir`` is not an empty directory.
     """
+
+    if include_history and result.ratings.matches_processed > 0 and not result.ratings.history:
+        raise ValueError(
+            "include_history=True but the calculation has no history entries; "
+            "recalculate with calculate(..., include_history=True) before writing history"
+        )
 
     directory = Path(output_dir)
     _prepare_output_dir(directory)
