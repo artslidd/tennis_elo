@@ -17,7 +17,7 @@ from .models import CalculationResult, RatingConfig
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .models import LoadResult, RatingResult
 
-_MAX_SEASONS = 3
+_MAX_SEASONS = 4
 
 
 def _normalize_seasons(seasons: Iterable[int]) -> tuple[int, ...]:

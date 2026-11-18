@@ -307,3 +307,39 @@ def test_dashboard_unknown_fallback_is_visible_with_real_api(tmp_path):
     assert set(history["tournament_level"]) == {"unknown"}
     assert set(history["tournament_weight"]) == {1.0}
     assert set(history["effective_k_factor"]) == {32.0}
+
+
+@pytest.mark.parametrize("weighted", [True, False], ids=["weighted", "classic"])
+def test_dashboard_warns_for_unknowns_only_in_earlier_comparison_seasons(tmp_path, weighted):
+    testing = pytest.importorskip("streamlit.testing.v1")
+    from tennis_elo.api import calculate
+    from tennis_elo.dashboard_views import COMPARISON_COLUMNS
+
+    _write_ui_season(tmp_path, 2024, "Brisbane ATP")
+    _write_ui_season(tmp_path, 2025, "Mystery Cup ATP")
+    _write_ui_season(tmp_path, 2026, "Australian Open ATP")
+    script = Path(__file__).resolve().parents[1] / "src/tennis_elo/dashboard.py"
+    with patch("tennis_elo.api.calculate", wraps=calculate) as calls:
+        app = testing.AppTest.from_file(str(script), default_timeout=60).run()
+        app.text_input(key="input_dir").set_value(str(tmp_path)).run()
+        app.checkbox(key="use_tournament_weights").set_value(weighted).run()
+        app.button(key="calculate").click().run()
+        _assert_no_ui_exception(app)
+        assert app.session_state["run"]["summary"]["tournament_weighting"]["unknown_matches"] == 0
+        assert not any("unknown" in warning.value.lower() for warning in app.warning)
+
+        app.button(key="compare_windows").click().run()
+        _assert_no_ui_exception(app)
+        warning_text = " ".join(warning.value for warning in app.warning).replace("\\", "")
+        assert "unknown" in warning_text.lower() and "1.00" in warning_text
+        assert all(
+            text in warning_text for text in ("2-season", "3-season", "2024", "2025", "2026")
+        )
+        assert "1-season" not in warning_text  # The primary/one-season calculation is clean.
+        dataset = _ui_table(app, COMPARISON_COLUMNS)
+        assert [int(value) for value in dataset["unknown_matches"]] == [0, 1, 1]
+        assert calls.call_count == 4  # main + three fresh, independent comparisons
+        app.selectbox(key="player_id").set_value("p2").run()
+        _assert_no_ui_exception(app)
+        assert calls.call_count == 4
+        assert any("unknown" in warning.value.lower() for warning in app.warning)
