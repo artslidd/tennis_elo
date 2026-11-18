@@ -57,7 +57,7 @@ def coefficient_for_level(level: str) -> float:
 - [x] Per match ALWAYS validate with `coefficient_for_level(match.tournament_level)`, then use that coefficient when enabled or 1.0 when disabled; call the existing pure Elo update once with `config.k_factor * coefficient` for both sides. Test invalid categories in both modes. Shared config already rejects max-coefficient overflow before replay.
 - [x] Fill classified level, APPLIED coefficient and actual effective K in both HistoryEntry records. Preserve raw IDs, precision, expected probabilities, chronology, names and counts.
 - [x] Test mixed levels, custom base K, unweighted mode, history symmetry, conservation, deterministic/shuffled replay, fresh calls, invalid categories and effective-K overflow.
-- [x] Worker `33230b5` integrated as `0fbd230`; parent reran `uv run --locked --extra dashboard pytest tests/test_elo.py tests/test_ratings.py tests/test_weighted_ratings.py -q`: 130 passed; Ruff clean. Worker full suite: 390 passed. Opus foundation/math spec-then-quality review requested at frozen `0fbd230`; catalog acceptance remains pending.
+- [x] Worker `33230b5` integrated as `0fbd230`; parent reran `uv run --locked --extra dashboard pytest tests/test_elo.py tests/test_ratings.py tests/test_weighted_ratings.py -q`: 130 passed; Ruff clean. Worker full suite: 390 passed. Opus 5.5 APPROVED foundation/math spec and quality at frozen `0fbd230`: independent random-tier real-data replay (K32/R01500 and K20/R01200), max rating difference ≤4.5e-13, identical ordering, history K/weight/deltas and zero-sum verified; six classic windows bitwise equal to pre-feature core. Catalog acceptance remains pending. Optional nits left out of scope.
 
 ### Task 4: CLI + exports (DeepSeek worker C)
 
@@ -95,7 +95,11 @@ def coefficient_for_level(level: str) -> float:
 
 ### Task 7: Independent acceptance
 
-- [ ] Opus 5.5 reviews catalog/data/math/model changes against the spec, then quality; another Opus 5.5 reviews CLI/export/dashboard integration, spec then quality. Reviewers are read-only; fresh snapshots must be explicit.
+- [ ] Opus 5.5 reviews catalog/data/math/model changes against the spec, then quality; separate Opus 5.5 reviews CLI/export and dashboard integration, spec then quality. Reviewers are read-only; fresh snapshots must be explicit.
+  - [x] Foundation/math approval at `0fbd230`.
+  - [ ] Catalog/data and end-to-end weighted reference approval.
+  - [ ] CLI/export approval.
+  - [ ] Weighting dashboard approval.
 - [ ] Address concrete Important findings test-first in owned worker lanes; integrate and obtain re-approval. Optional nits do not expand scope without justification.
 - [ ] Fresh full tests, Ruff, builds and final working-tree inspection. Record exact results/approvals here and commit documentation explicitly, leaving the user's untracked 2023 CSV alone.
 - [ ] Deliver usage, model semantics and results. No push, PR, merge to master, cleanup or remote changes.
@@ -107,12 +111,15 @@ def coefficient_for_level(level: str) -> float:
 - [x] Opus 5.5 approved plan/spec and shared foundation design. Incorporated canonical validation in both modes, proactive effective-K overflow validation, and explicit Slam-qualifying coefficient 2.00 (already part of the selected parent-category policy).
 - [x] Shared foundation committed at `9f4f1ad`; 340 tests and Ruff clean.
 - [x] Four DeepSeek V4.1 Flash workers launched via Studio: catalog `e7aa36ec-e3d7-43c3-a43f-dd8c29ae013c`; engine `d95747c3-7e78-4ab4-ae97-517cad11978e`; CLI `e0abc52f-f5bb-4bd8-8abe-0653c1cf6cbe`; dashboard `05003d6d-b4f2-40e1-b560-6cac96ea6566`.
-- [x] Parent-owned all-tier subprocess regressions added to `tests/test_integration.py` and observed RED before lane integration: weighted mode lacks warnings/weighted metadata; classic mode lacks `--unweighted`. Existing five malformed-CSV subprocess tests remain green. New tests intentionally remain pending sibling integration.
+- [x] Parent-owned all-tier subprocess regressions added to `tests/test_integration.py` and observed RED before lane integration: weighted mode lacks warnings/weighted metadata; classic mode lacks `--unweighted`. Existing five malformed-CSV subprocess tests remain green. New tests intentionally remain pending sibling integration. Interim full suite after engine+CLI integration: 422 passed / 2 expected failures, both now at classification counts (all rows still unknown before catalog); no other failures.
 - [x] Captured pre-feature classic-Elo baselines for all nine windows at `.worktrees/weighting-baseline-2eie9qqp`: full-precision players, rankings CSVs, legacy history hashes, and input SHA256 manifest.
-- [ ] Four isolated implementation workers complete.
-  - [x] Engine worker `01a1ee39-4457-72cf-8a5f-be0cb60c69e4`: `33230b5` → integrated `0fbd230`; parent 130 target tests/Ruff passed; Opus foundation/math review running.
+- [x] Interim check after replay/CLI integration (`01ed775`, before catalog): unweighted full-precision player records, rankings bytes and legacy-history hashes are EXACT for all nine windows; applied weight1/K32 and summary flag false verified. Input hashes unchanged. Repeat after catalog integration; independent weighted acceptance script is prepared in the same artifact directory.
+- [x] Four isolated implementation workers complete.
+  - [x] Engine worker `01a1ee39-4457-72cf-8a5f-be0cb60c69e4`: `33230b5` → integrated `0fbd230`; parent 130 target tests/Ruff passed; Opus foundation/math spec+quality APPROVED at `0fbd230` (no Important findings).
   - [x] CLI worker `01a1ee39-43a3-73c9-8cc8-096c478443fd`: `7ee36d0` → integrated `01ed775`; parent 83 CLI/export tests/Ruff passed; Opus CLI/export review requested. Classification notices use stdout, with visible unknown/fallback1 content; no literal 'warning' prefix required.
-  - [ ] Catalog/loader worker delivery.
-  - [ ] Dashboard worker delivery.
+  - [x] Catalog/loader worker `01a1ee39-44e9-74bc-a002-7f22438bbb74`: `6d72ee0` → integrated `d2d6981`; 285 new tests, 85 ATP Tour base names audited using season-specific ATP sources. All supplied 2023–26 eligible matches classified with zero unknowns. New 2023 CSV read in place, unchanged and untracked.
+  - [x] Dashboard worker `01a1ee39-4443-774a-a9c9-98b01f172994`: `f9984f5` → integrated `2436b0e`; parent 80 dashboard tests/Ruff passed against integrated engine/export. Parent added two real-API AppTest regressions: unknown fallback already passes; weighted-mode/cache/history case correctly fails at Slam winner 1516 vs required1532 until the classifier arrives. Opus weighting UI/config/cache/history/unknown-warning review requested; final known-tier real-API checks await catalog. README default-on checkbox wording matches final `Use tournament weights` control.
 - [ ] Integration and independent Opus acceptance complete.
+- [x] All four lanes integrated: parent full suite 727 passed / 0 skipped; Ruff clean. All four new parent CLI/AppTest integration cases now GREEN, including real Slam K64 versus classic K32, mode/cache invalidation, per-player comparisons and visible unknown fallback.
+- [x] Post-catalog all-nine-window acceptance passed: classic full-precision players/rankings bytes/legacy history hashes EXACT; independent weighted reference max difference ≤4.55e-13; history pair weight/effective-K/delta consistency, accounting, zero-sum totals and input SHA256 unchanged. Results artifact `.worktrees/weighting-baseline-2eie9qqp/weighted-verification.json`.
 - [x] Original P1 UI received final Opus 5.5 spec/quality approval at `a1b9823` (315 tests, no skips, real-API scenarios, headless health/cleanup); original P0/P1 acceptance gates now pass. This is not acceptance of the new weighting deltas.
