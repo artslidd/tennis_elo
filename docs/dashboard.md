@@ -1,0 +1,98 @@
+# Tennis Elo dashboard (P1)
+
+The optional local Streamlit dashboard presents the P0 ratings. It reads the
+season CSVs, calls the public API, and shows the leaderboard, exclusions and
+player detail. It hosts nothing remotely: the launcher binds loopback only and
+there is no authentication.
+
+## Install and launch
+
+```bash
+uv sync --extra dashboard                  # streamlit + pandas (optional extra)
+uv run --extra dashboard tennis-elo-dashboard
+```
+
+The console script starts the installed Streamlit CLI against
+`src/tennis_elo/dashboard.py` on `http://localhost:8501`. Options:
+
+```bash
+uv run --extra dashboard tennis-elo-dashboard --port 8600 --headless
+uv run --extra dashboard tennis-elo-dashboard -- --theme.base=dark
+```
+
+`--address` defaults to `localhost`; pass `--address 127.0.0.1` for the explicit
+loopback form. Everything after `--` is forwarded to `streamlit run`. The
+launcher blocks while the server runs - stop it with Ctrl-C. Without the extra it
+exits with code 1 and prints the `uv sync --extra dashboard` instruction instead
+of a traceback.
+
+`streamlit run src/tennis_elo/dashboard.py` also works directly.
+
+## What the UI does
+
+- **Data**: a local directory field plus `Reload seasons`. Seasons come from
+  `tennis_elo.api.available_seasons` (real `season_year` values in the CSVs, not
+  calendar years). Missing or unreadable directories and malformed data produce a
+  clear error message, never a traceback.
+- **Seasons**: an end-season picker, one/two/three-season presets that end at
+  that season, and an explicit multi-select that overrides the preset. Selection
+  rules (one to three distinct consecutive seasons) are validated before
+  `tennis_elo.api.calculate` is called.
+- **Controls**: initial rating, K-factor, retirement policy and a minimum-match
+  field. The minimum-match value is a presentation filter only: it changes the
+  leaderboard and the rankings CSV, never the Elo replay.
+- **Run metadata**: seasons, configuration, input files, available seasons,
+  physical rows read, selected rows, matches rated, players rated, ignored
+  duplicates, excluded rows and the load accounting identity.
+- **Leaderboard**: searchable by name or player ID, sortable by any column, Elo
+  rounded to one decimal for display only.
+- **Player detail**: a selector labelled `Name (player ID)` so equal names stay
+  distinguishable, key statistics, an Elo chart with one point per match date and
+  the match history (newest last).
+- **Downloads**: rankings and match-history CSV come from `tennis_elo.export`
+  (`rankings_csv` / `history_csv`). The full match-history export is behind an
+  opt-in toggle and is built once per run.
+
+`api.calculate` is always called with `include_history=True`.
+
+## Fresh-start and window semantics
+
+Each calculation independently starts every player at the configured initial
+rating and replays only the selected seasons; ratings are not continuous annual
+changes. The same caveat is visible in the UI.
+
+The window comparison recomputes the one-, two- and three-season windows that end
+at the chosen season, each with its own calculation from the same initial rating.
+If a window needs a season that is not in the data directory, the row is marked
+`unavailable`, lists the missing seasons, and is never replaced by a shorter
+calculation.
+
+## Text safety
+
+Player names, tournaments and surfaces come from CSV files, so every value that
+reaches Markdown is escaped (`escape_markdown`) and every value that reaches a
+plain widget label or table is stripped of angle brackets and control characters
+(`safe_label`). Download file names are sanitised (`safe_download_filename`).
+Streamlit's default HTML escaping is kept on; the app uses no custom CSS,
+`unsafe_allow_html` or remote assets.
+
+## Tests
+
+```bash
+uv run --locked pytest tests/test_models.py tests/test_dashboard.py -q
+uv run ruff check src/tennis_elo/dashboard.py src/tennis_elo/dashboard_launcher.py \
+    src/tennis_elo/dashboard_views.py tests/test_dashboard.py
+```
+
+`tests/test_dashboard.py` covers the pure helpers (search, sorting, player-ID
+disambiguation, window availability, text safety, errors), the launcher
+(argument construction, missing extra, invalid port, no import-time Streamlit),
+and Streamlit `AppTest` runs. The `AppTest` UI tests inject stub
+`tennis_elo.api` / `tennis_elo.export` modules through the import system, so they
+run in an isolated dashboard worktree. The test
+`test_app_integration_with_real_p0_modules_and_data` skips until the P0 modules
+and the season CSVs are present, and then runs a real 2026-season calculation
+through the UI; the integrated parent checkout runs it for real.
+
+A bounded manual smoke test of the launcher (start headless, request
+`/_stcore/health`, terminate, confirm the port is free) leaves no server behind.
