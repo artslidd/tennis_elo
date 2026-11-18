@@ -936,3 +936,127 @@ def test_duplicate_header_rejected(tmp_path):
     message = str(excinfo.value)
     assert "duplicate" in message
     assert "match_id" in message
+
+
+# --------------------------------------------------------------------------- #
+# load_matches: tournament level tagging (weighting catalog integration)
+# --------------------------------------------------------------------------- #
+
+
+def levels_by_id(result: LoadResult) -> dict[str, str]:
+    return {match.match_id: match.tournament_level for match in result.matches}
+
+
+@pytest.mark.parametrize(
+    ("tournament", "season", "tour", "expected"),
+    [
+        ("Australian Open ATP", "2024", "ATP Tour", "grand_slam"),
+        ("Wimbledon ATP - Qualification", "2024", "ATP Tour", "grand_slam"),
+        ("Rome ATP - Qualification", "2024", "ATP Tour", "masters_1000"),
+        ("Dallas ATP (indoor)", "2024", "ATP Tour", "atp_250"),
+        ("Doha ATP", "2024", "ATP Tour", "atp_250"),
+        ("Munich ATP - Qualification", "2024", "ATP Tour", "atp_250"),
+        ("Hamburg Chall. Men", "2024", "ATP Chall", "challenger"),
+        ("Hamburg Chall. Men - Qualification (indoor)", "2024", "ATP Challenger", "challenger"),
+        ("US Open ATP - WIC", "2024", "ATP Tour", "other"),
+        ("United Cup ATP", "2024", "ATP Tour", "other"),
+        ("Finals - Turin ATP (indoor)", "2024", "ATP Tour", "atp_finals"),
+        ("Fictional City ATP", "2024", "ATP Tour", "unknown"),
+        ("", "2024", "ATP Tour", "unknown"),
+    ],
+)
+def test_loader_tags_tournament_level_from_the_season_catalog(
+    tmp_path, tournament, season, tour, expected
+):
+    path = write_season_csv(
+        tmp_path / f"{season}-atp-season.csv",
+        [make_row(tournament=tournament, tour_type_human=tour, season_year=season)],
+    )
+    result = load_matches([path], [int(season)])
+    assert levels_by_id(result) == {"m1": expected}
+
+
+def test_loader_tags_each_season_with_its_own_category(tmp_path):
+    path_2024 = write_season_csv(
+        tmp_path / "2024-atp-season.csv",
+        [
+            make_row(match_id="dallas-2024", tournament="Dallas ATP (indoor)", season_year="2024"),
+            make_row(match_id="munich-2024", tournament="Munich ATP", season_year="2024"),
+        ],
+    )
+    path_2025 = write_season_csv(
+        tmp_path / "2025-atp-season.csv",
+        [
+            make_row(match_id="dallas-2025", tournament="Dallas ATP (indoor)", season_year="2025"),
+            make_row(match_id="munich-2025", tournament="Munich ATP", season_year="2025"),
+        ],
+    )
+    result = load_matches([path_2024, path_2025], [2024, 2025])
+    assert levels_by_id(result) == {
+        "dallas-2024": "atp_250",
+        "munich-2024": "atp_250",
+        "dallas-2025": "atp_500",
+        "munich-2025": "atp_500",
+    }
+
+
+def test_loader_levels_do_not_change_filtering_accounting_or_ordering(tmp_path):
+    path = write_season_csv(
+        tmp_path / "2024-atp-season.csv",
+        [
+            make_row(match_id="m1", tournament="Wimbledon ATP"),
+            make_row(match_id="m2", tournament="Hamburg Chall. Men", tour_type_human="ATP Chall"),
+            make_row(match_id="m3", tournament="Fictional City ATP"),
+            make_row(match_id="m4", tournament="", round="", surface=""),
+            make_row(match_id="m5", tournament="US Open ATP - WIC"),
+            make_row(match_id="m6", tournament="Doha ATP", status_extra="WALKOVER"),
+            make_row(match_id="m7", tournament="Munich ATP", status_extra="RETIRED"),
+            make_row(match_id="m8", tournament="Melbourne ATP", tour_type_human="WTA Tour"),
+            make_row(match_id="m9", tournament="Six Kings Slam Exhibition Men (indoor)",
+                     tour_type_human="ATP Exhib"),
+            make_row(match_id="m1", tournament="Wimbledon ATP"),
+        ],
+    )
+    result = load_matches([path], [2024])
+
+    assert result.rows_read == 10
+    assert result.selected_rows == 10
+    assert result.duplicate_rows == 1
+    assert result.excluded_counts == {
+        "exhibition": 1,
+        "unsupported_tour": 1,
+        "walkover": 1,
+    }
+    assert [match.match_id for match in result.matches] == ["m1", "m2", "m3", "m4", "m5", "m7"]
+    assert levels_by_id(result) == {
+        "m1": "grand_slam",
+        "m2": "challenger",
+        "m3": "unknown",
+        "m4": "unknown",
+        "m5": "other",
+        "m7": "atp_250",
+    }
+    assert_accounting(result)
+
+    without_retirements = load_matches([path], [2024], include_retirements=False)
+    assert [match.match_id for match in without_retirements.matches] == ["m1", "m2", "m3", "m4", "m5"]
+    assert without_retirements.excluded_counts["retirement"] == 1
+    assert levels_by_id(without_retirements) == {
+        "m1": "grand_slam",
+        "m2": "challenger",
+        "m3": "unknown",
+        "m4": "unknown",
+        "m5": "other",
+    }
+    assert_accounting(without_retirements)
+
+
+def test_loader_excluded_rows_are_not_tagged_or_loaded(tmp_path):
+    path = write_season_csv(
+        tmp_path / "2024-atp-season.csv",
+        [make_row(match_id="m1", tournament="Wimbledon ATP", status_extra="ABANDONED")],
+    )
+    result = load_matches([path], [2024])
+    assert result.matches == ()
+    assert result.excluded_counts == {"unfinished": 1}
+    assert_accounting(result)

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Final
 
 from tennis_elo.models import LoadResult, Match
+from tennis_elo.tournaments import classify_tournament
 
 CSV_GLOB: Final = "*-atp-season.csv"
 
@@ -398,4 +399,7 @@ def _build_match(row: dict[str, str], season: int, path: Path, line: int) -> Mat
         tournament=_field(row, "tournament"),
         round=_field(row, "round"),
         surface=_field(row, "surface"),
+        tournament_level=classify_tournament(
+            _field(row, "tournament"), season, _field(row, "tour_type_human")
+        ),
     )
